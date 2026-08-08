@@ -1,0 +1,52 @@
+base_url = "https://hupe1980.github.io/asm-rs"
+title = "asm-rs"
+description = "Pure Rust multi-architecture assembly engine. Assemble x86, x86-64, ARM, Thumb, AArch64 and RISC-V to machine code at runtime or compile time. Zero unsafe, no_std, WebAssembly-ready."
+
+default_language = "en"
+compile_sass = true
+build_search_index = true
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+
+# Trailing slashes keep every canonical URL in one form, which matters for the
+# canonical link tags and the sitemap.
+hard_link_static = false
+
+taxonomies = []
+
+[markdown]
+smart_punctuation = false
+render_emoji = false
+external_links_target_blank = true
+external_links_no_referrer = true
+insert_anchor_links = "heading"
+
+[markdown.highlighting]
+# Zola inlines this theme's colours onto each code block, so it cannot follow
+# the page's light/dark preference. Code surfaces are therefore deliberately
+# dark in both schemes — the page chrome around them adapts, the code does not.
+theme = "catppuccin-mocha"
+
+[search]
+include_title = true
+include_description = true
+include_path = true
+include_content = false
+
+[link_checker]
+skip_prefixes = ["https://crates.io"]
+
+[extra]
+repo = "https://github.com/hupe1980/asm-rs"
+crate = "https://crates.io/crates/asm-rs"
+api_docs = "https://docs.rs/asm-rs"
+author = "hupe1980"
+# Used for og:image and twitter:image; relative to base_url.
+social_image = "og.png"
+
+# Navigation shown in the header on every page.
+nav = [
+  { name = "Docs", url = "@/docs/_index.md" },
+  { name = "ISA Reference", url = "@/docs/reference/_index.md" },
+  { name = "API", url = "https://docs.rs/asm-rs", external = true },
+]

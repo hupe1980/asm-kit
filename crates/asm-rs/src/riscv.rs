@@ -557,7 +557,7 @@ fn vreg(op: &Operand, span: Span) -> Result<u32, AsmError> {
 ///   [6] = vta (0=tu, 1=ta)
 ///   [5:3] = vsew (e8=0, e16=1, e32=2, e64=3)
 ///   [2:0] = vlmul (m1=0, m2=1, m4=2, m8=3, mf8=5, mf4=6, mf2=7)
-fn parse_vtype(ops: &[Operand], start: usize, span: Span) -> Result<u32, AsmError> {
+fn parse_vtype(ops: &OperandList, start: usize, span: Span) -> Result<u32, AsmError> {
     if ops.len() < start + 4 {
         return Err(AsmError::InvalidOperands {
             detail: String::from("expected vtype: e{sew}, m{lmul}, ta|tu, ma|mu"),
@@ -661,7 +661,7 @@ fn parse_vtype(ops: &[Operand], start: usize, span: Span) -> Result<u32, AsmErro
 /// Returns a 2-byte `EncodedInstr` on success.
 fn encode_rvc_explicit(
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     is_rv64: bool,
     span: Span,
 ) -> Result<EncodedInstr, AsmError> {
@@ -1218,7 +1218,7 @@ fn cl_offset_d(off: i32, span: Span) -> Result<u16, AsmError> {
 }
 
 /// Encode a CA-type (register arithmetic) instruction with compact reg validation.
-fn ca_arith(ops: &[Operand], funct6: u16, funct2: u16, span: Span) -> Result<u16, AsmError> {
+fn ca_arith(ops: &OperandList, funct6: u16, funct2: u16, span: Span) -> Result<u16, AsmError> {
     let rd_p = compact_reg(reg(&ops[0], span)?).ok_or_else(|| AsmError::InvalidOperands {
         detail: String::from("rd/rs1 must be x8-x15 for compressed arithmetic"),
         span,
@@ -1383,11 +1383,11 @@ fn rvc_jump_reloc(label: &str, addend: i64) -> EncodedInstr {
 /// falling through to the 32-bit encoder.
 pub(crate) fn try_compress(
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     is_rv64: bool,
     _span: Span,
 ) -> Option<u16> {
-    match (mnemonic, ops) {
+    match (mnemonic, ops.as_slice()) {
         // nop → c.nop
         ("nop", []) => Some(ci_type(0b000, 0, 0, 0, C_OP_Q1)),
 
@@ -2895,6 +2895,12 @@ pub fn encode_riscv(instr: &Instruction, arch: Arch) -> Result<EncodedInstr, Asm
 
         // la rd, label → auipc rd, %hi(label) + addi rd, rd, %lo(label)
         "la" => {
+            if ops.len() != 2 {
+                return Err(AsmError::InvalidOperands {
+                    detail: alloc::string::String::from("la expects rd, label"),
+                    span,
+                });
+            }
             if let Some((label, addend)) = extract_label(&ops[1]) {
                 let rd = reg(&ops[0], span)?;
                 let w1 = u_type(OP_AUIPC, rd, 0); // auipc rd, %hi(label)
@@ -3603,7 +3609,15 @@ pub fn encode_riscv(instr: &Instruction, arch: Arch) -> Result<EncodedInstr, Asm
                 "vle16.v" => 0b101,
                 "vle32.v" => 0b110,
                 "vle64.v" => 0b111,
-                _ => unreachable!(),
+                // Unreachable via the enclosing match arm; returned as an error
+                // rather than a panic so a future edit to that arm cannot turn a
+                // mismatch into an abort on untrusted input.
+                _ => {
+                    return Err(AsmError::InvalidOperands {
+                        detail: alloc::format!("unhandled mnemonic '{mnemonic}'"),
+                        span: instr.span,
+                    })
+                }
             };
             // Unit-stride load: nf=000, mew=0, mop=00, vm, lumop=00000
             // [31:29]=nf | [28]=mew | [27:26]=mop | [25]=vm | [24:20]=lumop | [19:15]=rs1 | [14:12]=width | [11:7]=vd | [6:0]=0000111
@@ -3641,7 +3655,15 @@ pub fn encode_riscv(instr: &Instruction, arch: Arch) -> Result<EncodedInstr, Asm
                 "vse16.v" => 0b101,
                 "vse32.v" => 0b110,
                 "vse64.v" => 0b111,
-                _ => unreachable!(),
+                // Unreachable via the enclosing match arm; returned as an error
+                // rather than a panic so a future edit to that arm cannot turn a
+                // mismatch into an abort on untrusted input.
+                _ => {
+                    return Err(AsmError::InvalidOperands {
+                        detail: alloc::format!("unhandled mnemonic '{mnemonic}'"),
+                        span: instr.span,
+                    })
+                }
             };
             // Unit-stride store: nf=000, mew=0, mop=00, vm, sumop=00000
             (vm << 25) | (rs1 << 15) | (width << 12) | (vs3 << 7) | OP_V_STORE
@@ -5103,13 +5125,21 @@ mod tests {
     #[test]
     fn test_try_compress_nop() {
         let ops: Vec<Operand> = vec![];
-        assert!(try_compress("nop", &ops, false, Span::dummy()).is_some());
+        assert!(
+            try_compress("nop", &OperandList::from(ops.clone()), false, Span::dummy()).is_some()
+        );
     }
 
     #[test]
     fn test_try_compress_ebreak() {
         let ops: Vec<Operand> = vec![];
-        assert!(try_compress("ebreak", &ops, false, Span::dummy()).is_some());
+        assert!(try_compress(
+            "ebreak",
+            &OperandList::from(ops.clone()),
+            false,
+            Span::dummy()
+        )
+        .is_some());
     }
 
     #[test]
@@ -5119,7 +5149,12 @@ mod tests {
             unreachable!()
         };
         let ops = vec![Operand::Register(r10), Operand::Register(r10), imm(5)];
-        let hw = try_compress("addi", &ops, false, Span::dummy());
+        let hw = try_compress(
+            "addi",
+            &OperandList::from(ops.clone()),
+            false,
+            Span::dummy(),
+        );
         assert!(hw.is_some());
         let hw = hw.unwrap();
         assert_eq!(hw & 0x3, 0x01); // Q1
@@ -5133,7 +5168,13 @@ mod tests {
             unreachable!()
         };
         let ops = vec![Operand::Register(r10), Operand::Register(r10), imm(0)];
-        assert!(try_compress("addi", &ops, false, Span::dummy()).is_none());
+        assert!(try_compress(
+            "addi",
+            &OperandList::from(ops.clone()),
+            false,
+            Span::dummy()
+        )
+        .is_none());
     }
 
     #[test]
@@ -5148,7 +5189,13 @@ mod tests {
         let ops = vec![Operand::Register(r10), Operand::Register(r11), imm(5)];
         // This could be c.li if rs1==x0, but x11 != x0, so not c.li either.
         // And rd != rs1 so not c.addi.
-        assert!(try_compress("addi", &ops, false, Span::dummy()).is_none());
+        assert!(try_compress(
+            "addi",
+            &OperandList::from(ops.clone()),
+            false,
+            Span::dummy()
+        )
+        .is_none());
     }
 
     #[test]
@@ -5168,7 +5215,7 @@ mod tests {
             Operand::Register(r0),
             Operand::Register(r2),
         ];
-        let hw = try_compress("add", &ops, false, Span::dummy());
+        let hw = try_compress("add", &OperandList::from(ops.clone()), false, Span::dummy());
         assert!(hw.is_some());
     }
 
@@ -5176,7 +5223,7 @@ mod tests {
     fn test_try_compress_lw_sp() {
         // lw x10, 0(x2) → c.lwsp x10, 0
         let ops = vec![r(10), memop(2, 0)];
-        let hw = try_compress("lw", &ops, false, Span::dummy());
+        let hw = try_compress("lw", &OperandList::from(ops.clone()), false, Span::dummy());
         assert!(hw.is_some());
     }
 
@@ -5184,7 +5231,7 @@ mod tests {
     fn test_try_compress_sw_sp() {
         // sw x5, 0(x2) → c.swsp x5, 0
         let ops = vec![r(5), memop(2, 0)];
-        let hw = try_compress("sw", &ops, false, Span::dummy());
+        let hw = try_compress("sw", &OperandList::from(ops.clone()), false, Span::dummy());
         assert!(hw.is_some());
     }
 
@@ -5192,7 +5239,7 @@ mod tests {
     fn test_try_compress_lw_compact() {
         // lw x8, 0(x9) → c.lw x8', 0(x9')
         let ops = vec![r(8), memop(9, 0)];
-        let hw = try_compress("lw", &ops, false, Span::dummy());
+        let hw = try_compress("lw", &OperandList::from(ops.clone()), false, Span::dummy());
         assert!(hw.is_some());
     }
 
@@ -5201,10 +5248,14 @@ mod tests {
         // lw x1, 0(x2) — x1 not in x8-x15, x2 is SP but rd=x1 is fine for lwsp
         // Actually lw x1, 0(x2) → c.lwsp x1, 0 (x1 != x0, base=x2=sp)
         let ops = vec![r(1), memop(2, 0)];
-        assert!(try_compress("lw", &ops, false, Span::dummy()).is_some()); // lwsp
-                                                                           // lw x1, 0(x3) — x1 not compact, x3 not compact → can't compress
+        assert!(
+            try_compress("lw", &OperandList::from(ops.clone()), false, Span::dummy()).is_some()
+        ); // lwsp
+           // lw x1, 0(x3) — x1 not compact, x3 not compact → can't compress
         let ops2 = vec![r(1), memop(3, 0)];
-        assert!(try_compress("lw", &ops2, false, Span::dummy()).is_none());
+        assert!(
+            try_compress("lw", &OperandList::from(ops2.clone()), false, Span::dummy()).is_none()
+        );
     }
 
     // ── C-extension label relocation tests ──────────────────

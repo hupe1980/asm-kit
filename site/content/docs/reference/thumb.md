@@ -1,15 +1,10 @@
----
-layout: default
-title: Thumb
----
++++
+title = "Thumb"
+description = "Thumb and Thumb-2 instruction reference: 16-bit and 32-bit encodings, IT blocks and automatic width selection."
+weight = 4
++++
 
-# Thumb / Thumb-2 (T32) Instruction Reference
-
-Complete reference for all Thumb and Thumb-2 instructions supported by asm-rs.
-
-See also: [ARM32 Reference]({{ site.baseurl }}/reference/arm32).
-
----
+See also: [ARM32 Reference](@/docs/reference/arm32.md).
 
 ## Overview
 
@@ -28,8 +23,6 @@ to force a 32-bit wide encoding.
 | `Rd_hi` | Any register R0–R15 (high-register form) |
 | `#imm3/5/8` | Immediate of specified bit width |
 | `.w` | Suffix to force 32-bit (Thumb-2) encoding |
-
----
 
 ## Thumb-1 (16-bit) Instructions
 
@@ -133,8 +126,6 @@ bkpt  #0                      @ Breakpoint
 svc   #0                      @ Supervisor call
 ```
 
----
-
 ## Thumb-2 (32-bit) Instructions
 
 ### Wide Branch
@@ -158,8 +149,6 @@ orr.w r0, r1, r2              @ Wide OR
 
 > Thumb-2 uses a modified immediate encoding that supports a wider range of
 > constants than Thumb-1's limited immediate fields.
-
----
 
 ## IT Blocks
 
@@ -187,8 +176,6 @@ movcs r0, #1
 addcs r0, r0, #2
 ```
 
----
-
 ## Branch Relaxation
 
 Thumb branches automatically relax between narrow and wide forms:
@@ -203,8 +190,6 @@ Thumb branches automatically relax between narrow and wide forms:
 
 The linker automatically promotes narrow branches to wide when the target
 is out of range (Szymanski algorithm).
-
----
 
 ## Mode Switching Directives
 

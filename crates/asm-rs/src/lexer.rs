@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use core::str;
 
 use crate::error::{AsmError, Span};
+use crate::ir::Syntax;
 
 /// A token produced by the lexer.
 ///
@@ -107,6 +108,21 @@ pub enum TokenKind {
     Eof,
 }
 
+/// Tokenize assembly source text into a vector of tokens, using the default
+/// (Intel / GNU-as) comment conventions.
+///
+/// Equivalent to [`tokenize_with_syntax`] with [`Syntax::Intel`]. Use
+/// [`tokenize_with_syntax`] when assembling ARM, Thumb or AArch64 so that `#`
+/// is read as the UAL immediate prefix rather than a comment.
+///
+/// # Errors
+///
+/// Returns `Err(AsmError::Syntax)` if the input contains an unrecognised
+/// character or a malformed token (e.g. an unterminated string literal).
+pub fn tokenize(source: &str) -> Result<Vec<Token<'_>>, AsmError> {
+    tokenize_with_syntax(source, Syntax::Intel)
+}
+
 /// Tokenize assembly source text into a vector of tokens.
 ///
 /// The lexer recognizes:
@@ -118,16 +134,29 @@ pub enum TokenKind {
 /// - Label definitions (`name:`)
 /// - Numeric labels (`1:`, `1b`, `1f`)
 /// - Punctuation: `,`, `[`, `]`, `+`, `-`, `*`, `:`
-/// - Comments: `#` to end of line
+/// - Comments: `//` to end of line, plus a dialect-dependent character
 /// - Newlines and semicolons as statement separators
+///
+/// # The `#` character
+///
+/// `#` is genuinely ambiguous across assembly dialects, so its meaning follows
+/// `syntax`, exactly as it does in GNU `as`:
+///
+/// - [`Syntax::Ual`] (ARM, Thumb, AArch64) — `#` prefixes an immediate, as in
+///   `mov r0, #1`. Line comments are introduced by `@` or `//`.
+/// - Every other dialect — `#` starts a line comment, as in `# note`.
 ///
 /// # Errors
 ///
 /// Returns `Err(AsmError::Syntax)` if the input contains an unrecognised
 /// character or a malformed token (e.g. an unterminated string literal).
-pub fn tokenize<'s>(source: &'s str) -> Result<Vec<Token<'s>>, AsmError> {
-    // Heuristic: ~4 chars per token on average (mnemonics, registers, punctuation).
-    let mut tokens = Vec::with_capacity(source.len() / 3 + 1);
+pub fn tokenize_with_syntax(source: &str, syntax: Syntax) -> Result<Vec<Token<'_>>, AsmError> {
+    let ual = syntax == Syntax::Ual;
+    // Heuristic: ~3 bytes of source per token for dense assembly. Capped so a
+    // large source does not reserve hundreds of megabytes of `Token` up front
+    // on the strength of a guess; `Vec` growth handles the rest.
+    const MAX_PREALLOC_TOKENS: usize = 64 * 1024;
+    let mut tokens = Vec::with_capacity(core::cmp::min(source.len() / 3 + 1, MAX_PREALLOC_TOKENS));
     let bytes = source.as_bytes();
     let len = bytes.len();
     let mut pos = 0;
@@ -172,13 +201,46 @@ pub fn tokenize<'s>(source: &'s str) -> Result<Vec<Token<'s>>, AsmError> {
             continue;
         }
 
-        // Comment: # to EOL
-        if ch == b'#' {
-            pos += 1;
+        // Line comments: `//` in every dialect, plus `@` in UAL (where `#` is
+        // taken by the immediate prefix) and `#` everywhere else.
+        let starts_comment = match ch {
+            b'/' => pos + 1 < len && bytes[pos + 1] == b'/',
+            b'@' => ual,
+            b'#' => !ual,
+            _ => false,
+        };
+        if starts_comment {
             while pos < len && bytes[pos] != b'\n' {
                 pos += 1;
             }
             col = (pos - line_start) as u32 + 1;
+            continue;
+        }
+
+        // UAL immediate prefix: `mov r0, #1`, `add r0, r1, r2, lsl #3`.
+        //
+        // The prefix carries no information beyond "an immediate follows", and
+        // it can appear anywhere an immediate can — as a bare operand, as a
+        // memory displacement, as a shift amount. Rather than teach every one
+        // of those parse sites about it, validate it here and drop it, so the
+        // parser sees the same token stream either way. Requiring an
+        // immediate-like token after it keeps a stray `#` an error instead of
+        // silently vanishing.
+        if ch == b'#' {
+            let next = bytes.get(pos + 1).copied();
+            let immediate_follows = next.is_some_and(|c| {
+                c.is_ascii_digit()
+                    || c.is_ascii_alphabetic()
+                    || matches!(c, b'_' | b'-' | b'+' | b'\'' | b'(' | b'~')
+            });
+            if !immediate_follows {
+                return Err(AsmError::Syntax {
+                    msg: String::from("'#' must be followed by an immediate value"),
+                    span: Span::new(line, col, pos, 1),
+                });
+            }
+            pos += 1;
+            col += 1;
             continue;
         }
 

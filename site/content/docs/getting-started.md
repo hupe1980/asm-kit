@@ -1,21 +1,13 @@
----
-layout: default
-title: Getting Started
----
-
-# Getting Started
-
-Get up and running with asm-rs in minutes.
-
----
++++
+title = "Getting Started"
+description = "Install asm-rs and assemble your first machine code — one-shot API, builder API, labels, and compile-time macros."
+weight = 1
++++
 
 ## Installation
 
-Add asm-rs to your `Cargo.toml`:
-
-```toml
-[dependencies]
-asm-rs = "0.1"
+```sh
+cargo add asm-rs
 ```
 
 **Minimum Supported Rust Version**: 1.75
@@ -24,13 +16,9 @@ asm-rs = "0.1"
 
 For zero-overhead compile-time assembly:
 
-```toml
-[dependencies]
-asm-rs = "0.1"
-asm-rs-macros = "0.1"
+```sh
+cargo add asm-rs asm-rs-macros
 ```
-
----
 
 ## One-Shot Assembly
 
@@ -50,8 +38,6 @@ use asm_rs::{assemble_at, Arch};
 
 let bytes = assemble_at("nop\nret", Arch::X86_64, 0x400000).unwrap();
 ```
-
----
 
 ## Builder API
 
@@ -106,8 +92,6 @@ println!("{}", result.listing());
 // 00401005  C3                ret
 ```
 
----
-
 ## AT&T / GAS Syntax
 
 asm-rs supports full AT&T/GAS syntax (`%reg`, `$imm`, reversed operand order):
@@ -130,8 +114,6 @@ let result = asm.finish().unwrap();
 ```
 
 You can also switch syntax mid-stream with `.syntax att` / `.syntax intel` directives.
-
----
 
 ## Labels & Control Flow
 
@@ -166,8 +148,6 @@ let result = asm.finish().unwrap();
 assert_eq!(result.bytes(), &[0x74, 0x00, 0xC3]);
 ```
 
----
-
 ## Constants
 
 Define constants with `.equ`, `.set`, or `name = expression`:
@@ -193,8 +173,6 @@ asm.define_constant("SYS_EXIT", 60);
 asm.emit("mov eax, SYS_EXIT\nsyscall").unwrap();
 let result = asm.finish().unwrap();
 ```
-
----
 
 ## Data Directives
 
@@ -226,8 +204,6 @@ asm.fill(4, 1, 0x90);                   // emit 4 NOP bytes
 asm.space(16);                           // reserve 16 zero bytes
 let result = asm.finish().unwrap();
 ```
-
----
 
 ## Preprocessor
 
@@ -286,8 +262,6 @@ asm.emit(r#"
 let result = asm.finish().unwrap();
 ```
 
----
-
 ## Compile-Time Assembly
 
 The `asm-rs-macros` crate provides proc-macros for zero-overhead compile-time assembly:
@@ -311,8 +285,6 @@ const RV_CODE: &[u8] = asm_bytes!(rv64, "nop\nret");
 ```
 
 Assembly errors become compile-time errors with full diagnostics.
-
----
 
 ## Shellcode Examples
 
@@ -371,8 +343,6 @@ let bytes = assemble(r#"
 "#, Arch::Rv32).unwrap();
 ```
 
----
-
 ## Error Handling
 
 All errors include source location information:
@@ -399,11 +369,9 @@ match assemble("foobar", Arch::X86_64) {
 }
 ```
 
----
-
 ## Next Steps
 
-- [Architecture Guide]({{ site.baseurl }}/architecture) — deep dive into the assembler pipeline
-- [Configuration]({{ site.baseurl }}/configuration) — Cargo features and runtime options
-- [ISA References]({{ site.baseurl }}/reference/) — instruction references for all architectures
-- [API Reference]({{ site.baseurl }}/api-reference) — complete API documentation
+- [Architecture Guide](@/docs/architecture.md) — deep dive into the assembler pipeline
+- [Configuration](@/docs/configuration.md) — Cargo features and runtime options
+- [ISA References](@/docs/reference/_index.md) — instruction references for all architectures
+- [API Reference](@/docs/api-reference.md) — complete API documentation

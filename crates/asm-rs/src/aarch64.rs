@@ -66,6 +66,83 @@ fn sf(reg: Register) -> u32 {
     }
 }
 
+// ── Barrel shift operands ────────────────────────────────────────────────
+
+/// A decoded trailing shift operand: `(shift_type_bits, amount)`.
+type ShiftFields = (u32, u32);
+
+/// Extract a trailing `Operand::Shift` from `ops`, if present.
+///
+/// UAL writes the modifier as a trailing operand (`add x0, x1, x2, lsl #3`),
+/// so shift-capable encoders take the fixed operands from the front and call
+/// this to pick up the optional tail.
+fn trailing_shift(ops: &OperandList) -> Option<(ShiftOp, ShiftAmount)> {
+    match ops.last() {
+        Some(Operand::Shift(op, amount)) => Some((*op, *amount)),
+        _ => None,
+    }
+}
+
+/// Decode a trailing shift for a data-processing (shifted register) encoding.
+///
+/// `allow_ror` distinguishes the logical instructions — which accept all four
+/// shift types — from add/sub, which do not encode ROR. The shift amount is
+/// bounded by the register width: 6 bits for X registers, 5 for W.
+fn shifted_register_fields(
+    ops: &OperandList,
+    is_64bit: bool,
+    allow_ror: bool,
+    mnemonic: &str,
+    span: crate::error::Span,
+) -> Result<ShiftFields, AsmError> {
+    let Some((op, amount)) = trailing_shift(ops) else {
+        return Ok((0, 0)); // no modifier: LSL #0
+    };
+
+    let Some(shift_bits) = op.shift_type_bits() else {
+        return Err(invalid_ops(
+            mnemonic,
+            "register extends are not valid here; expected lsl, lsr, asr or ror",
+            span,
+        ));
+    };
+    if op == ShiftOp::Rrx {
+        return Err(invalid_ops(mnemonic, "rrx is an ARM32-only shift", span));
+    }
+    if shift_bits == 0b11 && !allow_ror {
+        return Err(invalid_ops(
+            mnemonic,
+            "ror is not encodable for add/sub; use lsl, lsr or asr",
+            span,
+        ));
+    }
+
+    let imm = match amount {
+        ShiftAmount::Immediate(v) => v,
+        ShiftAmount::None => 0,
+        ShiftAmount::Register(_) => {
+            return Err(invalid_ops(
+                mnemonic,
+                "register-supplied shift amounts are ARM32-only",
+                span,
+            ))
+        }
+    };
+    let max = if is_64bit { 63 } else { 31 };
+    if !(0..=max).contains(&imm) {
+        return Err(invalid_ops(
+            mnemonic,
+            if is_64bit {
+                "shift amount must be 0-63 for X registers"
+            } else {
+                "shift amount must be 0-31 for W registers"
+            },
+            span,
+        ));
+    }
+    Ok((shift_bits, imm as u32))
+}
+
 // ── Condition codes ──────────────────────────────────────────────────────
 
 fn cond_code(name: &str) -> Option<u32> {
@@ -185,7 +262,7 @@ fn neon_ld_st_multiple(q: u32, l: u32, opcode: u32, size: u32, rn: u32, rt: u32)
 fn encode_neon_3same(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     span: crate::error::Span,
     u: u32,
     opcode: u32,
@@ -228,7 +305,7 @@ fn encode_neon_3same(
 fn encode_neon_dispatch(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<bool, AsmError> {
     let span = instr.span;
@@ -496,7 +573,7 @@ fn encode_neon_dispatch(
 fn neon_3same_bitwise(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     span: crate::error::Span,
     u: u32,
     size: u32,
@@ -527,7 +604,7 @@ fn neon_3same_bitwise(
 fn encode_neon_2misc(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     span: crate::error::Span,
     u: u32,
     opcode: u32,
@@ -562,10 +639,13 @@ fn encode_neon_2misc(
 fn encode_addsub_imm(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
-    if ops.len() != 3 {
+    // A trailing `lsl #12` modifier makes this a 4-operand form; the shift is
+    // read below via `trailing_shift`.
+    let has_shift = ops.len() == 4 && matches!(ops[3], Operand::Shift(..));
+    if ops.len() != 3 && !has_shift {
         // 2-operand form: CMP Xn, #imm → SUBS XZR, Xn, #imm
         if ops.len() == 2 && matches!(mnemonic, "cmp" | "cmn") {
             let rn = get_a64_reg(&ops[0], mnemonic, instr.span)?;
@@ -621,11 +701,35 @@ fn encode_addsub_imm(
         ));
     }
 
-    // sf|op|S|10001|sh(0)|imm12|Rn|Rd
+    // Optional `lsl #12`: the single `sh` bit selects whether the 12-bit
+    // immediate is applied as-is or shifted left by 12.
+    let sh = match trailing_shift(ops) {
+        None => 0u32,
+        Some((ShiftOp::Lsl, ShiftAmount::Immediate(0)))
+        | Some((ShiftOp::Lsl, ShiftAmount::None)) => 0,
+        Some((ShiftOp::Lsl, ShiftAmount::Immediate(12))) => 1,
+        Some((ShiftOp::Lsl, _)) => {
+            return Err(invalid_ops(
+                mnemonic,
+                "only `lsl #0` and `lsl #12` are encodable on an add/sub immediate",
+                instr.span,
+            ))
+        }
+        Some(_) => {
+            return Err(invalid_ops(
+                mnemonic,
+                "only lsl is valid on an add/sub immediate",
+                instr.span,
+            ))
+        }
+    };
+
+    // sf|op|S|10001|sh|imm12|Rn|Rd
     let word = (sf_bit << 31)
         | (op << 30)
         | (s << 29)
         | (0b10001 << 24)
+        | (sh << 22)
         | ((imm as u32) << 10)
         | ((rn.a64_reg_num() as u32) << 5)
         | (rd.a64_reg_num() as u32);
@@ -639,7 +743,7 @@ fn encode_addsub_imm(
 fn encode_addsub_reg(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() < 3 {
@@ -664,16 +768,106 @@ fn encode_addsub_reg(
         _ => return Err(invalid_ops(mnemonic, "unknown add/sub variant", instr.span)),
     };
 
-    // sf|op|S|01011|00|0|Rm|000000|Rn|Rd
+    // Register 31 names the stack pointer in the extended-register form and
+    // the zero register in the shifted-register form, so `add sp, sp, x0` has
+    // to use the former — encoding it as a plain shifted register would
+    // assemble cleanly as `add xzr, xzr, x0`, silently discarding the result.
+    //
+    // For the flag-setting variants (ADDS/SUBS) only Rn can be SP; a `S`-form
+    // Rd of 31 is always XZR, which is what `cmn`/`cmp` rely on.
+    let needs_sp_form = rd.is_a64_sp() || rn.is_a64_sp();
+    let implicit_extend = if needs_sp_form {
+        if rd.is_a64_sp() && s == 1 {
+            return Err(invalid_ops(
+                mnemonic,
+                "the flag-setting form cannot write to sp",
+                instr.span,
+            ));
+        }
+        // LSL #n on an SP operand is encoded as UXTX/UXTW with the same
+        // amount — the extend is a no-op at the register's own width.
+        Some(if rd.is_a64_64bit() {
+            ShiftOp::Uxtx
+        } else {
+            ShiftOp::Uxtw
+        })
+    } else {
+        None
+    };
+
+    // A register *extend* (`uxtw`, `sxtb`, ...) selects a different encoding
+    // from a plain shift: bit 21 is set, and the shift field is replaced by a
+    // 3-bit `option` plus a 3-bit amount.
+    let explicit = trailing_shift(ops);
+    let extend = match (explicit, implicit_extend) {
+        // An explicit extend always wins.
+        (Some((op_kind, amount)), _) if op_kind.extend_option_bits().is_some() => {
+            Some((op_kind, amount))
+        }
+        // SP with an explicit `lsl #n`: keep the amount, switch to the extend
+        // encoding that can name SP.
+        (Some((ShiftOp::Lsl, amount)), Some(implicit)) => Some((implicit, amount)),
+        (Some(_), Some(_)) => {
+            return Err(invalid_ops(
+                mnemonic,
+                "only lsl or a register extend may be applied when an operand is sp",
+                instr.span,
+            ))
+        }
+        (None, Some(implicit)) => Some((implicit, ShiftAmount::None)),
+        _ => None,
+    };
+
+    if let Some((op_kind, amount)) = extend {
+        if let Some(option) = op_kind.extend_option_bits() {
+            let imm3 = match amount {
+                ShiftAmount::Immediate(v) if (0..=4).contains(&v) => v as u32,
+                ShiftAmount::None => 0,
+                ShiftAmount::Immediate(_) => {
+                    return Err(invalid_ops(
+                        mnemonic,
+                        "extend shift amount must be 0-4",
+                        instr.span,
+                    ))
+                }
+                ShiftAmount::Register(_) => {
+                    return Err(invalid_ops(
+                        mnemonic,
+                        "extend shift amount must be a constant",
+                        instr.span,
+                    ))
+                }
+            };
+            // sf|op|S|01011|00|1|Rm|option|imm3|Rn|Rd
+            let word = (sf_bit << 31)
+                | (op << 30)
+                | (s << 29)
+                | (0b01011 << 24)
+                | (1 << 21)
+                | ((rm.a64_reg_num() as u32) << 16)
+                | (option << 13)
+                | (imm3 << 10)
+                | ((rn.a64_reg_num() as u32) << 5)
+                | (rd.a64_reg_num() as u32);
+            emit32(buf, word);
+            return Ok(());
+        }
+    }
+
+    // ROR is not encodable for add/sub (shift = 0b11 is reserved).
+    let (shift, imm6) =
+        shifted_register_fields(ops, rd.is_a64_64bit(), false, mnemonic, instr.span)?;
+
+    // sf|op|S|01011|shift|0|Rm|imm6|Rn|Rd
     #[allow(clippy::identity_op)]
     let word = (sf_bit << 31)
         | (op << 30)
         | (s << 29)
         | (0b01011 << 24)
-        | (0 << 22) // shift = LSL
+        | (shift << 22)
         | (0 << 21)
         | ((rm.a64_reg_num() as u32) << 16)
-        | (0 << 10) // imm6 = 0
+        | (imm6 << 10)
         | ((rn.a64_reg_num() as u32) << 5)
         | (rd.a64_reg_num() as u32);
     emit32(buf, word);
@@ -685,7 +879,7 @@ fn encode_addsub_reg(
 fn encode_logical_reg(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     // TST Rn, Rm → ANDS XZR, Rn, Rm
@@ -732,15 +926,18 @@ fn encode_logical_reg(
         _ => return Err(invalid_ops(mnemonic, "unknown logical op", instr.span)),
     };
 
-    // sf|opc|01010|00|N|Rm|000000|Rn|Rd
-    #[allow(clippy::identity_op)]
+    // Logical instructions encode all four shift types, including ROR.
+    let (shift, imm6) =
+        shifted_register_fields(ops, rd.is_a64_64bit(), true, mnemonic, instr.span)?;
+
+    // sf|opc|01010|shift|N|Rm|imm6|Rn|Rd
     let word = (sf_bit << 31)
         | (opc << 29)
         | (0b01010 << 24)
-        | (0 << 22) // shift = LSL
+        | (shift << 22)
         | (n << 21)
         | ((rm.a64_reg_num() as u32) << 16)
-        | (0 << 10) // imm6 = 0
+        | (imm6 << 10)
         | ((rn.a64_reg_num() as u32) << 5)
         | (rd.a64_reg_num() as u32);
     emit32(buf, word);
@@ -752,7 +949,7 @@ fn encode_logical_reg(
 fn encode_movz_movn_movk(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() < 2 {
@@ -766,25 +963,54 @@ fn encode_movz_movn_movk(
     let imm = get_imm(&ops[1], mnemonic, instr.span)? as u64;
     let sf_bit = sf(rd);
 
-    // Optional shift: 3rd operand as immediate (shift amount: 0, 16, 32, 48)
-    let hw = if ops.len() >= 3 {
-        let shift = get_imm(&ops[2], mnemonic, instr.span)? as u64;
-        match shift {
-            0 => 0u32,
-            16 => 1,
-            32 => 2,
-            48 => 3,
-            _ => {
+    // Optional shift, written either as the UAL `lsl #16` modifier or as a
+    // bare third operand.
+    let shift = match ops.get(2) {
+        None => 0,
+        Some(Operand::Shift(op, amount)) => {
+            if *op != ShiftOp::Lsl {
                 return Err(invalid_ops(
                     mnemonic,
-                    "shift must be 0, 16, 32, or 48",
+                    "only lsl is valid on a move-wide immediate",
                     instr.span,
-                ))
+                ));
+            }
+            match amount {
+                ShiftAmount::Immediate(v) => *v as u64,
+                ShiftAmount::None => 0,
+                ShiftAmount::Register(_) => {
+                    return Err(invalid_ops(
+                        mnemonic,
+                        "move-wide shift must be a constant",
+                        instr.span,
+                    ))
+                }
             }
         }
-    } else {
-        0
+        Some(op) => get_imm(op, mnemonic, instr.span)? as u64,
     };
+    // The shift selects which 16-bit lane the immediate lands in, so only
+    // multiples of 16 are representable (and only 0/16 for W registers).
+    let hw = match shift {
+        0 => 0u32,
+        16 => 1,
+        32 => 2,
+        48 => 3,
+        _ => {
+            return Err(invalid_ops(
+                mnemonic,
+                "shift must be 0, 16, 32, or 48",
+                instr.span,
+            ))
+        }
+    };
+    if sf_bit == 0 && hw > 1 {
+        return Err(invalid_ops(
+            mnemonic,
+            "shift must be 0 or 16 for W registers",
+            instr.span,
+        ));
+    }
 
     if imm > 0xFFFF {
         return Err(invalid_ops(
@@ -814,23 +1040,152 @@ fn encode_movz_movn_movk(
 
 /// MOV pseudo-instruction: MOV Xd, Xm → ORR Xd, XZR, Xm
 ///                         MOV Xd, #imm → MOVZ/MOVN
-fn encode_mov(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+/// `INS`, `UMOV` and `SMOV` — moves between a general register and one lane of
+/// a vector register, plus the lane-to-lane `INS` (element) form.
+///
+/// `MOV` is the documented alias for all three: `mov v0.s[0], w0` is `INS`,
+/// `mov w0, v0.s[0]` is `UMOV`, and `mov v0.s[0], v1.s[1]` is `INS` (element).
+fn encode_vector_element_move(
+    buf: &mut InstrBytes,
+    mnemonic: &str,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
+    if ops.len() != 2 {
+        return Err(invalid_ops(mnemonic, "expected 2 operands", instr.span));
+    }
+    match (&ops[0], &ops[1]) {
+        // INS Vd.Ts[index], Rn — general register into a lane.
+        (Operand::VectorElement(vd, size, index), Operand::Register(rn)) if rn.is_aarch64() => {
+            if *size == ElementSize::D && !rn.is_a64_64bit() {
+                return Err(invalid_ops(
+                    mnemonic,
+                    "inserting into a .d lane requires an X register",
+                    instr.span,
+                ));
+            }
+            if *size != ElementSize::D && rn.is_a64_64bit() {
+                return Err(invalid_ops(
+                    mnemonic,
+                    "inserting into a .b/.h/.s lane requires a W register",
+                    instr.span,
+                ));
+            }
+            // 0100_1110_000|imm5|0_0011_1|Rn|Rd
+            let word = 0x4E00_1C00
+                | (size.imm5(*index) << 16)
+                | ((rn.a64_reg_num() as u32) << 5)
+                | (vd.a64_reg_num() as u32);
+            emit32(buf, word);
+            Ok(())
+        }
+        // INS Vd.Ts[i1], Vn.Ts[i2] — lane to lane.
+        (
+            Operand::VectorElement(vd, size, index),
+            Operand::VectorElement(vn, src_size, src_index),
+        ) => {
+            if size != src_size {
+                return Err(invalid_ops(
+                    mnemonic,
+                    "both lanes must have the same element size",
+                    instr.span,
+                ));
+            }
+            // 0110_1110_000|imm5|0|imm4|1|Rn|Rd
+            let word = 0x6E00_0400
+                | (size.imm5(*index) << 16)
+                | (src_size.imm4(*src_index) << 11)
+                | ((vn.a64_reg_num() as u32) << 5)
+                | (vd.a64_reg_num() as u32);
+            emit32(buf, word);
+            Ok(())
+        }
+        // UMOV/SMOV Rd, Vn.Ts[index] — a lane into a general register.
+        (Operand::Register(rd), Operand::VectorElement(vn, size, index)) if rd.is_aarch64() => {
+            let signed = mnemonic == "smov";
+            let q = u32::from(rd.is_a64_64bit());
+            if !signed {
+                // UMOV only has a 64-bit form for .d lanes; everything else
+                // reads into a W register.
+                let expect_64 = *size == ElementSize::D;
+                if expect_64 != rd.is_a64_64bit() {
+                    return Err(invalid_ops(
+                        mnemonic,
+                        if expect_64 {
+                            "umov from a .d lane requires an X register"
+                        } else {
+                            "umov from a .b/.h/.s lane requires a W register"
+                        },
+                        instr.span,
+                    ));
+                }
+            } else if *size == ElementSize::D {
+                return Err(invalid_ops(
+                    mnemonic,
+                    "smov has no .d form — the value already fills the register",
+                    instr.span,
+                ));
+            }
+            // 0|Q|001110000|imm5|0|op|1|Rn|Rd with op = 0111 (UMOV) or
+            // 0101 (SMOV) in bits 14:11.
+            let op = if signed { 0b0101 } else { 0b0111 };
+            let word = (q << 30)
+                | 0x0E00_0400
+                | (size.imm5(*index) << 16)
+                | (op << 11)
+                | ((vn.a64_reg_num() as u32) << 5)
+                | (rd.a64_reg_num() as u32);
+            emit32(buf, word);
+            Ok(())
+        }
+        _ => Err(invalid_ops(
+            mnemonic,
+            "expected a vector lane and a register",
+            instr.span,
+        )),
+    }
+}
+
+fn encode_mov(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 2 {
         return Err(invalid_ops("mov", "expected 2 operands", instr.span));
     }
 
+    // `MOV` is the alias spelling of the vector lane moves.
+    if matches!(ops[0], Operand::VectorElement(..)) || matches!(ops[1], Operand::VectorElement(..))
+    {
+        return encode_vector_element_move(buf, "mov", ops, instr);
+    }
+
     match (&ops[0], &ops[1]) {
         (Operand::Register(rd), Operand::Register(rm)) if rd.is_aarch64() && rm.is_aarch64() => {
-            // MOV Xd, Xm → ORR Xd, XZR, Xm
             let sf_bit = sf(*rd);
-            // sf|01|01010|00|0|Rm|000000|11111|Rd
-            let word = (sf_bit << 31)
-                | (0b01 << 29)
-                | (0b01010 << 24)
-                | ((rm.a64_reg_num() as u32) << 16)
-                | (0b11111 << 5) // Rn = XZR
-                | (rd.a64_reg_num() as u32);
-            emit32(buf, word);
+            if rd.is_a64_sp() || rm.is_a64_sp() {
+                // The usual `MOV Xd, Xm` alias is `ORR Xd, XZR, Xm`, whose
+                // register-31 encoding means XZR — so it cannot name SP at
+                // all. `MOV` to or from SP is instead an alias for
+                // `ADD Rd, Rn, #0`, where 31 does mean SP.
+                // sf|0|0|10001|00|000000000000|Rn|Rd
+                let word = (sf_bit << 31)
+                    | (0b10001 << 24)
+                    | ((rm.a64_reg_num() as u32) << 5)
+                    | (rd.a64_reg_num() as u32);
+                emit32(buf, word);
+            } else {
+                // MOV Xd, Xm → ORR Xd, XZR, Xm
+                // sf|01|01010|00|0|Rm|000000|11111|Rd
+                let word = (sf_bit << 31)
+                    | (0b01 << 29)
+                    | (0b01010 << 24)
+                    | ((rm.a64_reg_num() as u32) << 16)
+                    | (0b11111 << 5) // Rn = XZR
+                    | (rd.a64_reg_num() as u32);
+                emit32(buf, word);
+            }
         }
         (Operand::Register(rd), Operand::Immediate(imm)) if rd.is_aarch64() => {
             let val = *imm as u64;
@@ -915,7 +1270,7 @@ fn encode_mov(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Res
 fn encode_branch(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -964,7 +1319,7 @@ fn encode_branch(
 fn encode_br_blr_ret(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match mnemonic {
@@ -1009,7 +1364,7 @@ fn encode_br_blr_ret(
 fn encode_bcond(
     buf: &mut InstrBytes,
     cond_name: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<RelaxInfo>,
@@ -1093,7 +1448,7 @@ fn encode_bcond(
 fn encode_cbz(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<RelaxInfo>,
@@ -1172,10 +1527,98 @@ fn encode_cbz(
 // ── Load / Store ─────────────────────────────────────────────────────────
 
 /// LDR/STR (unsigned offset): size|11|1|00|01|opc|imm12|Rn|Rt
+/// LDUR/STUR and friends — load/store with an *unscaled* 9-bit signed offset.
+///
+/// The scaled `LDR Xt, [Xn, #imm12]` form can only address non-negative,
+/// naturally-aligned offsets. These unscaled variants cover the rest:
+/// `ldur x0, [x1, #-16]` has no scaled equivalent.
+///
+/// Layout: `size|111|0|00|opc|0|imm9|00|Rn|Rt`
+fn encode_ldur_stur(
+    buf: &mut InstrBytes,
+    mnemonic: &str,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
+    if ops.len() != 2 {
+        return Err(invalid_ops(mnemonic, "expected Rt, [Xn, #imm]", instr.span));
+    }
+    let rt = get_a64_reg(&ops[0], mnemonic, instr.span)?;
+    let is_64 = rt.is_a64_64bit();
+
+    // `opc` selects load vs store and, for the signed loads, the width the
+    // value is extended to: 10 = sign-extend to 64-bit, 11 = to 32-bit.
+    let (size_bits, opc) = match mnemonic {
+        "stur" => (if is_64 { 3u32 } else { 2 }, 0b00u32),
+        "ldur" => (if is_64 { 3 } else { 2 }, 0b01),
+        "sturb" => (0, 0b00),
+        "ldurb" => (0, 0b01),
+        "sturh" => (1, 0b00),
+        "ldurh" => (1, 0b01),
+        "ldursb" => (0, if is_64 { 0b10 } else { 0b11 }),
+        "ldursh" => (1, if is_64 { 0b10 } else { 0b11 }),
+        "ldursw" => (2, 0b10),
+        _ => {
+            return Err(invalid_ops(
+                mnemonic,
+                "unknown unscaled load/store",
+                instr.span,
+            ))
+        }
+    };
+
+    let mem = match &ops[1] {
+        Operand::Memory(m) => m,
+        _ => {
+            return Err(invalid_ops(
+                mnemonic,
+                "expected a memory operand",
+                instr.span,
+            ))
+        }
+    };
+    let base = mem
+        .base
+        .ok_or_else(|| invalid_ops(mnemonic, "expected a base register", instr.span))?;
+    if mem.index.is_some() {
+        return Err(invalid_ops(
+            mnemonic,
+            "unscaled load/store does not take an index register",
+            instr.span,
+        ));
+    }
+    if mem.addr_mode != AddrMode::Offset {
+        return Err(invalid_ops(
+            mnemonic,
+            "unscaled load/store does not support pre/post-index",
+            instr.span,
+        ));
+    }
+
+    let imm = mem.disp;
+    if !(-256..=255).contains(&imm) {
+        return Err(invalid_ops(
+            mnemonic,
+            "unscaled offset must be in the range -256..255",
+            instr.span,
+        ));
+    }
+    let imm9 = (imm as u32) & 0x1FF;
+
+    let word = (size_bits << 30)
+        | (0b111 << 27)
+        | (opc << 22)
+        | (imm9 << 12)
+        | ((base.a64_reg_num() as u32) << 5)
+        | (rt.a64_reg_num() as u32);
+    emit32(buf, word);
+    Ok(())
+}
+
 fn encode_ldr_str(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -1376,7 +1819,7 @@ fn encode_ldr_str(
 fn encode_stp_ldp(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() < 3 {
@@ -1439,7 +1882,7 @@ fn encode_stp_ldp(
 fn encode_shift(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 3 {
@@ -1520,6 +1963,21 @@ fn encode_shift(
                         | (rd.a64_reg_num() as u32);
                     emit32(buf, word);
                 }
+                "ror" => {
+                    // ROR Rd, Rn, #n → EXTR Rd, Rn, Rn, #n
+                    // (rotating a value by n is extracting a field starting n
+                    // bits into the concatenation of the value with itself).
+                    let n = sf_bit;
+                    let rn_num = rn.a64_reg_num() as u32;
+                    let word = (sf_bit << 31)
+                        | (0b00100111 << 23)
+                        | (n << 22)
+                        | (rn_num << 16)
+                        | (amount << 10)
+                        | (rn_num << 5)
+                        | (rd.a64_reg_num() as u32);
+                    emit32(buf, word);
+                }
                 _ => {
                     return Err(invalid_ops(
                         mnemonic,
@@ -1542,7 +2000,11 @@ fn encode_shift(
 
 // ── System / NOP / SVC / BRK ─────────────────────────────────────────────
 
-fn encode_svc(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_svc(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 1 {
         return Err(invalid_ops("svc", "expected immediate", instr.span));
     }
@@ -1560,7 +2022,11 @@ fn encode_svc(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Res
     Ok(())
 }
 
-fn encode_brk(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_brk(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 1 {
         return Err(invalid_ops("brk", "expected immediate", instr.span));
     }
@@ -1578,7 +2044,11 @@ fn encode_brk(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Res
     Ok(())
 }
 
-fn encode_hlt(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_hlt(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 1 {
         return Err(invalid_ops("hlt", "expected immediate", instr.span));
     }
@@ -1601,7 +2071,7 @@ fn encode_hlt(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Res
 fn encode_csel(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() < 3 {
@@ -1659,7 +2129,7 @@ fn encode_csel(
 fn encode_adr(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<RelaxInfo>,
@@ -1755,7 +2225,7 @@ fn encode_adr(
 fn encode_mul_div(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match mnemonic {
@@ -1924,7 +2394,11 @@ fn encode_mul_div(
 // ── MVN ──────────────────────────────────────────────────────────────────
 
 /// MVN Xd, Xm → ORN Xd, XZR, Xm
-fn encode_mvn(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_mvn(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 2 {
         return Err(invalid_ops("mvn", "expected Rd, Rm", instr.span));
     }
@@ -1964,7 +2438,7 @@ fn get_cond(op: &Operand, mnemonic: &str, span: crate::error::Span) -> Result<u3
 fn encode_cond_alias(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match mnemonic {
@@ -2038,7 +2512,7 @@ fn encode_cond_alias(
 fn encode_tbz(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<RelaxInfo>,
@@ -2134,7 +2608,7 @@ fn encode_tbz(
 fn encode_bitmanip(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -2196,7 +2670,7 @@ fn encode_bitmanip(
 fn encode_extend(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -2254,7 +2728,7 @@ fn sysreg_encoding(name: &str) -> Option<u32> {
 fn encode_mrs_msr(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -2328,7 +2802,7 @@ fn barrier_option(name: &str) -> Option<u32> {
 fn encode_barrier(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     // Default CRm = SY (0xF) if no operand
@@ -2441,7 +2915,7 @@ fn encode_bitmask_imm_inner(value: u64) -> Option<(u32, u32, u32)> {
 fn encode_logical_imm(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     let (rd, rn, imm_val) = if matches!(mnemonic, "tst") {
@@ -2602,7 +3076,7 @@ fn encode_ldr_str_idx(
 fn encode_stp_ldp_idx(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() < 3 {
@@ -2684,7 +3158,7 @@ fn encode_stp_ldp_idx(
 fn encode_atomic(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     // Parse ordering suffix (a/l/al) and size suffix (b/h)
@@ -2935,7 +3409,7 @@ fn parse_atomic_suffixes(mnemonic: &str) -> Result<(&str, u32, u32, u32), AsmErr
 fn encode_exclusive(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     // Determine base and attributes from mnemonic
@@ -3091,7 +3565,7 @@ fn parse_exclusive_mnemonic(
 fn encode_ordered(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     let (is_store, suffix_size) = parse_ordered_mnemonic(mnemonic, instr.span)?;
@@ -3187,7 +3661,7 @@ fn parse_ordered_mnemonic(
 fn encode_bitfield(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 4 {
@@ -3285,7 +3759,7 @@ fn encode_bitfield(
 fn encode_ccmp(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     // CCMP Rn, Rm_or_imm5, #nzcv, cond
@@ -3365,7 +3839,11 @@ fn encode_ccmp(
 /// Encode EXTR Rd, Rn, Rm, #lsb
 /// sf|00|100111|N0|Rm|imms|Rn|Rd
 #[allow(clippy::identity_op)]
-fn encode_extr(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_extr(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 4 {
         return Err(invalid_ops("extr", "expected Rd, Rn, Rm, #lsb", instr.span));
     }
@@ -3458,7 +3936,7 @@ fn sve_size(arr: VectorArrangement, span: crate::error::Span) -> Result<u32, Asm
 fn encode_sve_dispatch(
     buf: &mut InstrBytes,
     mnemonic: &str,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<bool, AsmError> {
     match mnemonic {
@@ -3576,7 +4054,7 @@ fn encode_sve_dispatch(
 fn encode_sve_arith_unpred(
     buf: &mut InstrBytes,
     base: u32,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     let mnemonic = instr.mnemonic.as_str();
@@ -3599,7 +4077,7 @@ fn encode_sve_arith_unpred(
 fn encode_sve_arith_pred(
     buf: &mut InstrBytes,
     base: u32,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     let mnemonic = instr.mnemonic.as_str();
@@ -3625,7 +4103,7 @@ fn encode_sve_arith_pred(
 fn encode_sve_logical_unpred(
     buf: &mut InstrBytes,
     base: u32,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     let mnemonic = instr.mnemonic.as_str();
@@ -3646,7 +4124,7 @@ fn encode_sve_logical_unpred(
 fn encode_sve_logical_pred(
     buf: &mut InstrBytes,
     base: u32,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     let mnemonic = instr.mnemonic.as_str();
@@ -3744,6 +4222,7 @@ pub fn encode_aarch64(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
 
         // ── Move ─────────────────────────────────────────────
         "mov" => encode_mov(&mut buf, ops, instr)?,
+        "ins" | "umov" | "smov" => encode_vector_element_move(&mut buf, mnemonic, ops, instr)?,
         "movz" | "movn" | "movk" => encode_movz_movn_movk(&mut buf, mnemonic, ops, instr)?,
         "mvn" => encode_mvn(&mut buf, ops, instr)?,
 
@@ -3864,6 +4343,9 @@ pub fn encode_aarch64(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
         }
 
         // ── Load / Store ─────────────────────────────────────
+        "ldur" | "stur" | "ldurb" | "sturb" | "ldurh" | "sturh" | "ldursb" | "ldursh"
+        | "ldursw" => encode_ldur_stur(&mut buf, mnemonic, ops, instr)?,
+
         "ldr" | "str" | "ldrb" | "strb" | "ldrh" | "strh" | "ldrsb" | "ldrsh" | "ldrsw" => {
             // Check for pre-index or post-index addressing modes
             if ops.len() >= 2 {
@@ -3955,61 +4437,9 @@ pub fn encode_aarch64(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
             encode_atomic(&mut buf, mnemonic, ops, instr)?
         }
 
-        // ── NEON ops whose first operand is a scalar register ──
-        "umov" => {
-            if ops.len() != 2 {
-                return Err(invalid_ops(mnemonic, "expected 2 operands", instr.span));
-            }
-            let rd = get_a64_reg(&ops[0], mnemonic, instr.span)?;
-            let (rn, arr) = get_a64_vreg(&ops[1], mnemonic, instr.span)?;
-            let q: u32 = if arr.element_bits() == 64 { 1 } else { 0 };
-            let imm5: u32 = match arr.element_bits() {
-                8 => 0b00001,
-                16 => 0b00010,
-                32 => 0b00100,
-                64 => 0b01000,
-                _ => return Err(invalid_ops(mnemonic, "invalid arrangement", instr.span)),
-            };
-            let word = (q << 30)
-                | (1u32 << 29)
-                | (0b01110000 << 21)
-                | (imm5 << 16)
-                | (0b00111 << 11)
-                | (1 << 10)
-                | ((rn.a64_reg_num() as u32) << 5)
-                | (rd.a64_reg_num() as u32);
-            emit32(&mut buf, word);
-        }
-        "smov" => {
-            if ops.len() != 2 {
-                return Err(invalid_ops(mnemonic, "expected 2 operands", instr.span));
-            }
-            let rd = get_a64_reg(&ops[0], mnemonic, instr.span)?;
-            let (rn, arr) = get_a64_vreg(&ops[1], mnemonic, instr.span)?;
-            let q: u32 = if rd.is_a64_64bit() { 1 } else { 0 };
-            let imm5: u32 = match arr.element_bits() {
-                8 => 0b00001,
-                16 => 0b00010,
-                32 => 0b00100,
-                _ => {
-                    return Err(invalid_ops(
-                        mnemonic,
-                        "invalid arrangement for smov",
-                        instr.span,
-                    ))
-                }
-            };
-            let word = (q << 30)
-                | (0b001110000 << 21)
-                | (imm5 << 16)
-                | (0b00101 << 11)
-                | (1 << 10)
-                | ((rn.a64_reg_num() as u32) << 5)
-                | (rd.a64_reg_num() as u32);
-            emit32(&mut buf, word);
-        }
-
-        // ── SVE predicate operations ─────────────────────────
+        // NOTE: `umov`/`smov`/`ins` are handled above via
+        // `encode_vector_element_move`, which takes a lane operand
+        // (`v0.s[2]`) rather than an arrangement.
         "ptrue" => {
             // PTRUE Pd.T{, pattern}
             // Encoding: 0x2518E000 | (size << 22) | (pattern << 5) | Pd
@@ -4092,7 +4522,10 @@ pub fn encode_aarch64(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
                 "ld1h" => 0xA4A0A000u32,
                 "ld1w" => 0xA540A000u32,
                 "ld1d" => 0xA5E0A000u32,
-                _ => unreachable!(),
+                // Unreachable via the enclosing match arm; returned as an error
+                // rather than a panic so a future edit to that arm cannot turn a
+                // mismatch into an abort on untrusted input.
+                _ => return Err(invalid_ops(mnemonic, "unhandled mnemonic", instr.span)),
             };
             let word = base_enc
                 | ((pg.a64_p_num() as u32) << 10)
@@ -4126,7 +4559,10 @@ pub fn encode_aarch64(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
                 "st1h" => 0xE4A0E000u32,
                 "st1w" => 0xE540E000u32,
                 "st1d" => 0xE5E0E000u32,
-                _ => unreachable!(),
+                // Unreachable via the enclosing match arm; returned as an error
+                // rather than a panic so a future edit to that arm cannot turn a
+                // mismatch into an abort on untrusted input.
+                _ => return Err(invalid_ops(mnemonic, "unhandled mnemonic", instr.span)),
             };
             let word = base_enc
                 | ((pg.a64_p_num() as u32) << 10)
@@ -4149,7 +4585,10 @@ pub fn encode_aarch64(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
                 "cnth" => 1,
                 "cntw" => 2,
                 "cntd" => 3,
-                _ => unreachable!(),
+                // Unreachable via the enclosing match arm; returned as an error
+                // rather than a panic so a future edit to that arm cannot turn a
+                // mismatch into an abort on untrusted input.
+                _ => return Err(invalid_ops(mnemonic, "unhandled mnemonic", instr.span)),
             };
             let pattern: u32 = 0b11111; // ALL
             let word = 0x0420E000 | (size << 22) | (pattern << 5) | (rd.a64_reg_num() as u32);
@@ -5336,6 +5775,18 @@ mod tests {
 
     // ── NEON / AdvSIMD tests ─────────────────────────────────
 
+    fn velem(n: u8, size: ElementSize, index: u8) -> Operand {
+        use Register::*;
+        let r = match n {
+            0 => A64V0,
+            1 => A64V1,
+            2 => A64V2,
+            3 => A64V3,
+            _ => A64V0,
+        };
+        Operand::VectorElement(r, size, index)
+    }
+
     fn vreg(n: u8, arr: VectorArrangement) -> Operand {
         use Register::*;
         let r = match n {
@@ -5687,18 +6138,54 @@ mod tests {
 
     #[test]
     fn neon_umov_w0_v0_s4() {
-        // UMOV W0, V0.S[0]
-        // Q=0, 1, 01110000, imm5=00100, 00111, 1, Rn=0, Rd=0
-        let w = enc("umov", vec![wreg(0), vreg(0, VectorArrangement::S4)]);
-        assert_eq!(w, 0x2E04_3C00);
+        // UMOV W0, V0.S[0] — 0|Q=0|001110000|imm5=00100|0|0111|1|Rn=0|Rd=0.
+        // Bit 29 is zero here; the operand names a lane, not an arrangement.
+        let w = enc("umov", vec![wreg(0), velem(0, ElementSize::S, 0)]);
+        assert_eq!(w, 0x0E04_3C00);
+        // A non-zero lane index shifts into imm5.
+        let w2 = enc("umov", vec![wreg(0), velem(0, ElementSize::S, 2)]);
+        assert_eq!(w2, 0x0E14_3C00);
     }
 
     #[test]
     fn neon_smov_x0_v0_s4() {
         // SMOV X0, V0.S[0]
         // Q=1 (64-bit dest), 0, 01110000, imm5=00100, 00101, 1, Rn=0, Rd=0
-        let w = enc("smov", vec![xreg(0), vreg(0, VectorArrangement::S4)]);
+        let w = enc("smov", vec![xreg(0), velem(0, ElementSize::S, 0)]);
         assert_eq!(w, 0x4E04_2C00);
+    }
+
+    #[test]
+    fn neon_ins_from_general_and_element() {
+        // INS V0.S[0], W0
+        assert_eq!(
+            enc("ins", vec![velem(0, ElementSize::S, 0), wreg(0)]),
+            0x4E04_1C00
+        );
+        // INS V0.S[0], V1.S[1] — source lane goes in imm4.
+        assert_eq!(
+            enc(
+                "ins",
+                vec![velem(0, ElementSize::S, 0), velem(1, ElementSize::S, 1)]
+            ),
+            0x6E04_2420
+        );
+    }
+
+    #[test]
+    fn neon_element_move_width_is_checked() {
+        // A .d lane needs an X register, .b/.h/.s need a W register: silently
+        // encoding the wrong width would read or write the wrong bits.
+        assert!(encode_aarch64(&make_instr(
+            "umov",
+            vec![wreg(0), velem(0, ElementSize::D, 0)]
+        ))
+        .is_err());
+        assert!(encode_aarch64(&make_instr(
+            "ins",
+            vec![velem(0, ElementSize::S, 0), xreg(0)]
+        ))
+        .is_err());
     }
 
     // ── MOV (vector alias) ───────────────────────────────────

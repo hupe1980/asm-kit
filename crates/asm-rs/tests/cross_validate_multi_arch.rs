@@ -825,12 +825,13 @@ fn arm32_yax_strh_r0_r1() {
 
 #[test]
 fn arm32_yax_add_r0_r1_r2_lsl_3() {
-    arm32_xval::verify("add r0, r1, r2, lsl, 3", ArmOpcode::ADD);
+    // UAL spelling: the shift is a trailing operand, not a comma-separated pair.
+    arm32_xval::verify("add r0, r1, r2, lsl #3", ArmOpcode::ADD);
 }
 
 #[test]
 fn arm32_yax_mov_r0_r1_lsr_4() {
-    arm32_xval::verify("mov r0, r1, lsr, 4", ArmOpcode::MOV);
+    arm32_xval::verify("mov r0, r1, lsr #4", ArmOpcode::MOV);
 }
 
 #[test]

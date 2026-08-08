@@ -153,6 +153,24 @@ pub enum AsmError {
         span: Span,
     },
 
+    /// A branch target is not aligned to the granularity its encoding can
+    /// represent.
+    ///
+    /// PC-relative branches store their displacement pre-scaled — AArch64
+    /// shifts right by 2, Thumb and RISC-V by 1 — so the low bits of an
+    /// unaligned target have nowhere to go. Truncating them would silently
+    /// branch somewhere other than the label.
+    MisalignedBranchTarget {
+        /// The target label name.
+        label: String,
+        /// The displacement that could not be represented.
+        disp: i64,
+        /// Required alignment, in bytes.
+        alignment: u8,
+        /// Source location of the branch instruction.
+        span: Span,
+    },
+
     /// Syntax error during lexing or parsing.
     Syntax {
         /// The syntax error message.
@@ -231,6 +249,18 @@ impl fmt::Display for AsmError {
                     f,
                     "{}: branch target '{}' out of range (displacement={}, max=±{})",
                     span, label, disp, max
+                )
+            }
+            AsmError::MisalignedBranchTarget {
+                label,
+                disp,
+                alignment,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{}: branch target '{}' is not {}-byte aligned (displacement={})",
+                    span, label, alignment, disp
                 )
             }
             AsmError::Syntax { msg, span } => {

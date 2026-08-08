@@ -53,6 +53,40 @@ pub fn parse_with_syntax(
     parser.parse_program()
 }
 
+/// Parse statements one at a time, handing each to `sink` as it is produced.
+///
+/// This is the streaming counterpart to [`parse_with_syntax`], and the form
+/// the assembler uses. `Statement` is a large value — the operand list is
+/// stored inline to keep encoding allocation-free — so collecting a whole
+/// program into a `Vec` costs hundreds of bytes per instruction and makes peak
+/// memory proportional to the *source* rather than to the output. Consuming
+/// each statement immediately keeps that at one statement.
+///
+/// `sink` may return an error to abort parsing early.
+///
+/// # Errors
+///
+/// Returns [`AsmError`] on a syntax error, or whatever `sink` returns.
+pub fn parse_streaming<F>(
+    tokens: &[Token<'_>],
+    arch: Arch,
+    syntax: Syntax,
+    mut sink: F,
+) -> Result<(), AsmError>
+where
+    F: FnMut(Statement) -> Result<(), AsmError>,
+{
+    let mut parser = Parser::new(tokens, arch, syntax);
+    parser.skip_newlines();
+    while !parser.at_end() {
+        if let Some(stmt) = parser.parse_statement()? {
+            sink(stmt)?;
+        }
+        parser.skip_newlines();
+    }
+    Ok(())
+}
+
 struct Parser<'a> {
     tokens: &'a [Token<'a>],
     pos: usize,
@@ -786,7 +820,7 @@ impl<'a> Parser<'a> {
             } else {
                 op
             };
-            operands.push(op);
+            push_operand(&mut operands, op, &mnemonic, mnemonic_span)?;
             if hint.is_some() && size_hint.is_none() {
                 size_hint = hint;
             }
@@ -799,7 +833,7 @@ impl<'a> Parser<'a> {
             while self.peek().kind == TokenKind::Comma {
                 self.advance(); // skip comma
                 let (op, hint) = self.parse_operand()?;
-                operands.push(op);
+                push_operand(&mut operands, op, &mnemonic, mnemonic_span)?;
                 if hint.is_some() && size_hint.is_none() {
                     size_hint = hint;
                 }
@@ -983,6 +1017,47 @@ impl<'a> Parser<'a> {
         self.parse_operand_inner()
     }
 
+    /// Parse the amount following a shift/extend keyword.
+    ///
+    /// The amount is optional: `rrx` never takes one, and a bare extend such
+    /// as `uxtb` defaults to a shift of zero.
+    fn parse_shift_amount(&mut self) -> Result<ShiftAmount, AsmError> {
+        let tok = self.peek().clone();
+        match &tok.kind {
+            TokenKind::Number(n) => {
+                self.advance();
+                Ok(ShiftAmount::Immediate(clamp_shift(*n)))
+            }
+            TokenKind::Minus => {
+                self.advance();
+                match self.peek().kind {
+                    TokenKind::Number(n) => {
+                        self.advance();
+                        Ok(ShiftAmount::Immediate(clamp_shift(-n)))
+                    }
+                    _ => Err(AsmError::Syntax {
+                        msg: String::from("expected a number after '-' in shift amount"),
+                        span: self.peek().span,
+                    }),
+                }
+            }
+            TokenKind::Ident => {
+                let mut lbuf = [0u8; 32];
+                let lower = to_lower_buf(&tok.text, &mut lbuf);
+                match parse_register_lower(lower, self.arch) {
+                    Some(reg) => {
+                        self.advance();
+                        Ok(ShiftAmount::Register(reg))
+                    }
+                    // Not a register — the shift stands alone (`rrx`, `uxtb`)
+                    // and this identifier belongs to whatever follows.
+                    None => Ok(ShiftAmount::None),
+                }
+            }
+            _ => Ok(ShiftAmount::None),
+        }
+    }
+
     /// Case-insensitive size hint parsing (zero allocations).
     fn try_parse_size_hint(&mut self, ident: &str) -> Option<OperandSize> {
         if ident.eq_ignore_ascii_case("byte") {
@@ -1067,6 +1142,30 @@ impl<'a> Parser<'a> {
                         let lower = to_lower_buf(&rtok.text, &mut lbuf);
                         if let Some(reg) = parse_register_lower(lower, self.arch) {
                             self.advance();
+                            // Range form: `{r0-r7}` is shorthand for every
+                            // register from r0 to r7 inclusive.
+                            if self.peek().kind == TokenKind::Minus {
+                                self.advance(); // consume '-'
+                                let etok = self.peek().clone();
+                                let mut ebuf = [0u8; 32];
+                                let elower = to_lower_buf(&etok.text, &mut ebuf);
+                                let end = match (&etok.kind, parse_register_lower(elower, self.arch))
+                                {
+                                    (TokenKind::Ident, Some(r)) => r,
+                                    _ => {
+                                        return Err(AsmError::Syntax {
+                                            msg: alloc::format!(
+                                                "expected register after '-' in register range, found '{}'",
+                                                etok.text
+                                            ),
+                                            span: etok.span,
+                                        })
+                                    }
+                                };
+                                self.advance();
+                                expand_register_range(reg, end, &mut regs, etok.span)?;
+                                continue;
+                            }
                             regs.push(reg);
                             continue;
                         }
@@ -1193,12 +1292,81 @@ impl<'a> Parser<'a> {
                     }
                 }
 
+                // ARM32 program status register with a field selector:
+                // `msr cpsr_f, r0`. Checked before the register table so the
+                // suffix is not lost.
+                if matches!(self.arch, Arch::Arm | Arch::Thumb) {
+                    if let Some(psr) = PsrField::from_lower(lower) {
+                        self.advance();
+                        return Ok((Operand::PsrField(psr), None));
+                    }
+                }
+
+                // Barrel-shift / register-extend modifier: `lsl #3`, `asr r3`,
+                // `rrx`, `uxtw #2`. Only in the UAL dialects — `lsl` is also a
+                // mnemonic, but a mnemonic has already been consumed by the
+                // time operands are parsed, so there is no ambiguity here.
+                if matches!(self.arch, Arch::Arm | Arch::Thumb | Arch::Aarch64) {
+                    if let Some(shift_op) = ShiftOp::from_lower(lower) {
+                        self.advance();
+                        let amount = self.parse_shift_amount()?;
+                        return Ok((Operand::Shift(shift_op, amount), None));
+                    }
+                }
+
                 // Try register (possibly with vector arrangement: v0.4s, z0.s, p0.b)
                 if let Some(dot_pos) = lower.find('.') {
                     // Check for vector register with arrangement specifier
                     let reg_part = &lower[..dot_pos];
                     let arr_part = &lower[dot_pos + 1..];
                     if let Some(reg) = parse_register_lower(reg_part, self.arch) {
+                        // Lane access: `v0.s[0]` names one element rather than
+                        // an arrangement, so it is checked first — `.s` alone
+                        // is not a valid arrangement, but `.s[0]` is a lane.
+                        if reg.is_a64_vector() {
+                            if let Some(size) = ElementSize::from_lower(arr_part) {
+                                if self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                                    == Some(&TokenKind::OpenBracket)
+                                {
+                                    self.advance(); // register + size
+                                    self.advance(); // '['
+                                    let idx_tok = self.peek().clone();
+                                    let index = match idx_tok.kind {
+                                        TokenKind::Number(n)
+                                            if (0..i128::from(size.lane_count())).contains(&n) =>
+                                        {
+                                            n as u8
+                                        }
+                                        TokenKind::Number(n) => {
+                                            return Err(AsmError::Syntax {
+                                                msg: alloc::format!(
+                                                    "lane index {} out of range for .{} (0-{})",
+                                                    n,
+                                                    size,
+                                                    size.lane_count() - 1
+                                                ),
+                                                span: idx_tok.span,
+                                            })
+                                        }
+                                        _ => {
+                                            return Err(AsmError::Syntax {
+                                                msg: String::from("expected a lane index"),
+                                                span: idx_tok.span,
+                                            })
+                                        }
+                                    };
+                                    self.advance(); // index
+                                    if self.peek().kind != TokenKind::CloseBracket {
+                                        return Err(AsmError::Syntax {
+                                            msg: String::from("expected ']' after lane index"),
+                                            span: self.peek().span,
+                                        });
+                                    }
+                                    self.advance(); // ']'
+                                    return Ok((Operand::VectorElement(reg, size, index), None));
+                                }
+                            }
+                        }
                         if reg.is_a64_vector() || reg.is_a64_sve_z() || reg.is_a64_sve_p() {
                             if let Some(arr) = VectorArrangement::parse(arr_part) {
                                 self.advance();
@@ -1862,6 +2030,72 @@ pub fn parse_register(name: &str, arch: Arch) -> Option<Register> {
 }
 
 /// Inner register parser — expects **already-lowered** input.
+/// Append a parsed operand, reporting a diagnostic instead of panicking when
+/// the instruction names more operands than any encoding takes.
+///
+/// The count comes straight from user input, so the fixed-capacity list has to
+/// be filled fallibly — `OperandList::push` panics, which for a library
+/// assembling untrusted text would be a denial of service.
+fn push_operand(
+    operands: &mut OperandList,
+    op: Operand,
+    mnemonic: &str,
+    span: Span,
+) -> Result<(), AsmError> {
+    if operands.try_push(op) {
+        Ok(())
+    } else {
+        Err(AsmError::InvalidOperands {
+            detail: alloc::format!(
+                "'{}' has more than {} operands",
+                mnemonic,
+                OperandList::MAX_LEN
+            ),
+            span,
+        })
+    }
+}
+
+/// Narrow a lexed shift amount to the width [`ShiftAmount`] stores.
+///
+/// Saturating rather than truncating: an out-of-range amount must stay
+/// out of range so the encoder still rejects it, instead of wrapping into a
+/// value that happens to encode.
+fn clamp_shift(n: i128) -> i32 {
+    n.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32
+}
+
+/// Expand an inclusive register range such as `r0-r7` into `regs`.
+///
+/// Only meaningful for ARM32/Thumb general-purpose registers, which are the
+/// registers that appear in `{...}` push/pop/LDM/STM lists.
+fn expand_register_range(
+    start: Register,
+    end: Register,
+    regs: &mut Vec<Register>,
+    span: Span,
+) -> Result<(), AsmError> {
+    if !start.is_arm() || !end.is_arm() {
+        return Err(AsmError::Syntax {
+            msg: String::from("register ranges are only supported for ARM32/Thumb registers"),
+            span,
+        });
+    }
+    let (lo, hi) = (start.arm_reg_num(), end.arm_reg_num());
+    if lo > hi {
+        return Err(AsmError::Syntax {
+            msg: alloc::format!("register range r{}-r{} is inverted", lo, hi),
+            span,
+        });
+    }
+    for n in lo..=hi {
+        if let Some(r) = Register::from_arm_reg_num(n) {
+            regs.push(r);
+        }
+    }
+    Ok(())
+}
+
 fn parse_register_lower(name: &str, arch: Arch) -> Option<Register> {
     use Register::*;
 
@@ -2160,6 +2394,7 @@ fn parse_register_aarch64(name: &str) -> Option<Register> {
         "w29" => Some(A64W29),
         "w30" => Some(A64W30),
         "wzr" => Some(A64Wzr),
+        "wsp" => Some(A64Wsp),
         // SIMD/FP vector registers (V0–V31)
         "v0" => Some(A64V0),
         "v1" => Some(A64V1),

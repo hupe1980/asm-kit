@@ -2785,8 +2785,9 @@ fn xv_mulx_r64() {
 
 #[test]
 fn xv_opt_zero_idiom_mov_eax_0() {
-    // mov eax, 0 → xor eax, eax (OptLevel::Size)
-    let (mnemonic, formatted) = asm_and_decode_opt("mov eax, 0", asm_rs::OptLevel::Size);
+    // mov eax, 0 → xor eax, eax (OptLevel::Aggressive — the transform
+    // clobbers FLAGS, so it is not part of the default level).
+    let (mnemonic, formatted) = asm_and_decode_opt("mov eax, 0", asm_rs::OptLevel::Aggressive);
     assert_eq!(mnemonic, IcedMnemonic::Xor, "zero-idiom: {formatted}");
     assert!(
         formatted.to_lowercase().contains("eax"),
@@ -2797,7 +2798,7 @@ fn xv_opt_zero_idiom_mov_eax_0() {
 #[test]
 fn xv_opt_zero_idiom_mov_rax_0() {
     // mov rax, 0 → xor eax, eax (narrows to 32-bit, zero-extends)
-    let (mnemonic, formatted) = asm_and_decode_opt("mov rax, 0", asm_rs::OptLevel::Size);
+    let (mnemonic, formatted) = asm_and_decode_opt("mov rax, 0", asm_rs::OptLevel::Aggressive);
     assert_eq!(mnemonic, IcedMnemonic::Xor, "zero-idiom 64→32: {formatted}");
     assert!(
         formatted.to_lowercase().contains("eax"),

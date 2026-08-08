@@ -13,12 +13,8 @@ Compile-time assembly proc-macros for [`asm-rs`](https://crates.io/crates/asm-rs
 
 ## Usage
 
-Add to `Cargo.toml`:
-
-```toml
-[dependencies]
-asm-rs = "0.1"
-asm-rs-macros = "0.1"
+```sh
+cargo add asm-rs asm-rs-macros
 ```
 
 ## Examples

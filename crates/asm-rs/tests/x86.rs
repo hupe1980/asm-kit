@@ -144,12 +144,14 @@ fn x86_xval_mov_eax_imm32() {
     assert_eq!(code, vec![0xb8, 0x2a, 0x00, 0x00, 0x00]);
 }
 
-/// MOV ECX, 0 — our optimizer converts to XOR ECX, ECX (zero idiom): [0x31,0xc9]
-/// llvm-mc reference: [0xb9,0x00,0x00,0x00,0x00] (unoptimized MOV r32, imm32)
+/// MOV ECX, 0 — encoding: [0xb9,0x00,0x00,0x00,0x00], matching llvm-mc.
+///
+/// The `xor ecx, ecx` zero idiom would be two bytes shorter but writes FLAGS,
+/// so it is only applied at [`OptLevel::Aggressive`], not by `assemble()`.
 #[test]
 fn x86_xval_mov_ecx_0() {
     let code = assemble("mov ecx, 0", Arch::X86).unwrap();
-    assert_eq!(code, vec![0x31, 0xc9]); // optimized: XOR ECX, ECX
+    assert_eq!(code, vec![0xb9, 0x00, 0x00, 0x00, 0x00]);
 }
 
 /// MOV ECX, EAX — encoding: [0x89,0xc1]

@@ -1,14 +1,8 @@
----
-layout: default
-title: AArch64
----
-
-# AArch64 (ARM64) Instruction Reference
-
-Complete reference for all AArch64 instructions supported by asm-rs,
-including NEON (AdvSIMD) and SVE extensions.
-
----
++++
+title = "AArch64"
+description = "AArch64 (A64) instruction reference: data processing, shifted and extended operands, load/store, NEON/AdvSIMD and LSE atomics."
+weight = 2
++++
 
 ## Notation
 
@@ -25,8 +19,6 @@ including NEON (AdvSIMD) and SVE extensions.
 | `SP` | Stack pointer (X31 context-dependent) |
 | `LR` | Link register (X30) |
 | `XZR` / `WZR` | Zero register (reads as 0, writes discarded) |
-
----
 
 ## Hint / System
 
@@ -50,8 +42,6 @@ isb                            // Instruction synchronization barrier
 ```
 
 Barrier options: `sy`, `ish`, `ishld`, `ishst`, `nsh`, `nshld`, `nshst`, `osh`, `oshld`, `oshst`.
-
----
 
 ## Branch
 
@@ -109,8 +99,6 @@ adrp  x0, label               // Load page address (±4 GB)
 
 > `ADR` relaxes to `ADRP` + `ADD` pair (8 bytes, ±4 GB) when target exceeds ±1 MB.
 
----
-
 ## Data Processing — Immediate
 
 ```asm
@@ -144,8 +132,6 @@ sdiv  x0, x1, x2              // Signed divide
 udiv  x0, x1, x2              // Unsigned divide
 ```
 
----
-
 ## Logical — Register
 
 ```asm
@@ -175,8 +161,6 @@ tst   x0, #0xFF               // Test with bitmask immediate
 > that allows a wide variety of repeating bit patterns. Not all arbitrary
 > 64-bit constants can be encoded as bitmask immediates.
 
----
-
 ## Move
 
 ```asm
@@ -188,8 +172,6 @@ movn  x0, #0                  // Move wide negative
 movk  x0, #0xABCD, lsl #32   // Move wide keep (insert 16-bit slice)
 ```
 
----
-
 ## Shift
 
 ```asm
@@ -199,8 +181,6 @@ asr   x0, x1, #4              // Arithmetic shift right
 ror   x0, x1, #4              // Rotate right
 lsl   x0, x1, x2              // Shift by register
 ```
-
----
 
 ## Bit Manipulation
 
@@ -213,8 +193,6 @@ rev16 x0, x1                  // Reverse bytes in each 16-bit halfword
 rev32 x0, x1                  // Reverse bytes in each 32-bit word
 ```
 
----
-
 ## Extend
 
 ```asm
@@ -224,8 +202,6 @@ sxtb  x0, w1                  // Signed extend byte (8 → 64)
 sxth  x0, w1                  // Signed extend halfword (16 → 64)
 sxtw  x0, w1                  // Signed extend word (32 → 64)
 ```
-
----
 
 ## Conditional Select
 
@@ -242,8 +218,6 @@ cinc  x0, x1, ne              // Increment x1 if NE
 cneg  x0, x1, ne              // Negate x1 if NE
 ```
 
----
-
 ## Conditional Compare
 
 ```asm
@@ -252,8 +226,6 @@ ccmp  x0, #5, #0, ne          // Compare x0,#5 if NE; else set nzcv=#0
 ccmn  x0, x1, #0, eq          // Compare negative if EQ
 ccmn  x0, #5, #0, ne          // Compare negative with immediate if NE
 ```
-
----
 
 ## Bitfield
 
@@ -269,8 +241,6 @@ ubfiz x0, x1, #lsb, #width   // Unsigned bitfield insert in zero
 sbfiz x0, x1, #lsb, #width   // Signed bitfield insert in zero
 extr  x0, x1, x2, #lsb       // Extract from pair of registers
 ```
-
----
 
 ## Load / Store
 
@@ -325,8 +295,6 @@ ldr   x0, =0xDEADBEEF         // Load from literal pool
 ldr   w0, =42                 // 32-bit literal pool load
 ```
 
----
-
 ## Atomics (LSE)
 
 ### Load-Op
@@ -362,8 +330,6 @@ stset   x0, [x1]              // Atomic store-set
 steor   x0, [x1]              // Atomic store-XOR
 ```
 
----
-
 ## Exclusive Access
 
 ```asm
@@ -371,10 +337,8 @@ ldxr    x0, [x1]              // Load exclusive
 ldaxr   x0, [x1]              // Load-acquire exclusive
 stxr    w2, x0, [x1]          // Store exclusive (w2 = success)
 stlxr   w2, x0, [x1]          // Store-release exclusive
-# Byte/halfword variants: ldxrb, ldaxrb, stxrb, stlxrb, ldxrh, ...
+// Byte/halfword variants: ldxrb, ldaxrb, stxrb, stlxrb, ldxrh, ...
 ```
-
----
 
 ## Load-Acquire / Store-Release
 
@@ -386,8 +350,6 @@ stlr    x0, [x1]              // Store-release (C11 atomic_store)
 stlrb   w0, [x1]              // Store-release byte
 stlrh   w0, [x1]              // Store-release halfword
 ```
-
----
 
 ## NEON (AdvSIMD)
 
@@ -446,8 +408,6 @@ Supported element arrangements:
 | `.4S` | 4 × word | 128-bit |
 | `.1D` | 1 × doubleword | 64-bit |
 | `.2D` | 2 × doubleword | 128-bit |
-
----
 
 ## Literal Pools
 

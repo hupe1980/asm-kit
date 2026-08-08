@@ -107,7 +107,10 @@ impl AssemblyResult {
         self.bytes.is_empty()
     }
 
-    /// Get label addresses (name, absolute address).
+    /// Get label addresses (name, absolute address), sorted by name.
+    ///
+    /// The ordering is part of the contract:
+    /// [`label_address()`](Self::label_address) binary-searches this slice.
     ///
     /// # Examples
     ///
@@ -129,6 +132,10 @@ impl AssemblyResult {
 
     /// Look up a label address by name.
     ///
+    /// Runs in O(log n): [`labels()`](Self::labels) is kept sorted by name, so
+    /// this binary-searches rather than scanning. That matters for the common
+    /// pattern of resolving many symbols out of one large assembly.
+    ///
     /// # Examples
     ///
     /// ```
@@ -144,7 +151,10 @@ impl AssemblyResult {
     /// ```
     #[must_use]
     pub fn label_address(&self, name: &str) -> Option<u64> {
-        self.labels.iter().find(|(n, _)| n == name).map(|(_, a)| *a)
+        self.labels
+            .binary_search_by(|(n, _)| n.as_str().cmp(name))
+            .ok()
+            .map(|i| self.labels[i].1)
     }
 
     /// Get the applied relocations — where label references were patched.
@@ -310,9 +320,10 @@ impl AssemblyResult {
 ///     max_labels: 100,
 ///     max_output_bytes: 4096,
 ///     max_errors: 16,
-///     max_recursion_depth: 64,
+///     max_recursion_depth: 32,
 ///     max_source_bytes: 64 * 1024 * 1024,
 ///     max_iterations: 100_000,
+///     max_expanded_bytes: 1024 * 1024,
 /// });
 /// // Assembly of very large or pathological inputs will now error early.
 /// ```
@@ -337,6 +348,14 @@ pub struct ResourceLimits {
     /// Maximum total preprocessor iterations (`.rept`/`.irp`/`.irpc`).
     /// Default: 100,000.
     pub max_iterations: usize,
+    /// Maximum number of bytes the preprocessor may produce. Default: 64 MiB.
+    ///
+    /// Iteration and recursion counts alone do not bound expansion *size*:
+    /// a single `.rept 50000` around a 8 KiB body costs 50,000 iterations but
+    /// produces 400 MiB of text, and mutually-invoking macros grow
+    /// exponentially with depth. This limit caps the total expanded text so
+    /// such inputs fail fast instead of exhausting memory.
+    pub max_expanded_bytes: usize,
 }
 
 impl Default for ResourceLimits {
@@ -346,9 +365,14 @@ impl Default for ResourceLimits {
             max_labels: 100_000,
             max_output_bytes: 16 * 1024 * 1024,
             max_errors: 64,
-            max_recursion_depth: 256,
+            // Each expansion level costs a stack frame; keep the default low
+            // enough that hitting the limit returns an error rather than
+            // overflowing the stack (which aborts and cannot be caught),
+            // including on the small stacks typical of embedded targets.
+            max_recursion_depth: 32,
             max_source_bytes: 64 * 1024 * 1024,
             max_iterations: 100_000,
+            max_expanded_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -395,6 +419,9 @@ pub struct Assembler {
     /// Pending literal pool entries: (value, size_bytes, synthetic_label).
     /// Flushed at `.ltorg`, unconditional branches, or `finish()`.
     literal_pool: Vec<LiteralPoolEntry>,
+    /// Index into `literal_pool` by `(value, size)`, so deduplicating an entry
+    /// is a map lookup rather than a scan of every pending entry.
+    literal_pool_index: alloc::collections::BTreeMap<(i128, u8), usize>,
     /// Counter for generating unique literal pool labels.
     literal_pool_counter: usize,
     /// Whether RISC-V C extension auto-narrowing is enabled (`.option rvc`).
@@ -437,20 +464,28 @@ impl Assembler {
             Arch::X86_64 => crate::ir::X86Mode::Mode64,
             _ => crate::ir::X86Mode::Mode64, // unused for non-x86
         };
+        let resource_limits = ResourceLimits::default();
+        let mut linker = Linker::new();
+        linker.set_max_output_bytes(resource_limits.max_output_bytes);
+        let mut preprocessor = Preprocessor::new();
+        preprocessor.set_max_recursion_depth(resource_limits.max_recursion_depth);
+        preprocessor.set_max_iterations(resource_limits.max_iterations);
+        preprocessor.set_max_expanded_bytes(resource_limits.max_expanded_bytes);
         Self {
             arch,
             x86_mode,
             syntax,
             opt_level: OptLevel::default(),
-            linker: Linker::new(),
-            preprocessor: Preprocessor::new(),
+            linker,
+            preprocessor,
             errors: Vec::new(),
             fragment_annotations: Vec::new(),
             listing_enabled: false,
-            resource_limits: ResourceLimits::default(),
+            resource_limits,
             statement_count: 0,
             label_count: 0,
             literal_pool: Vec::new(),
+            literal_pool_index: alloc::collections::BTreeMap::new(),
             literal_pool_counter: 0,
             rvc_enabled: false,
             thumb_func_pending: false,
@@ -467,6 +502,9 @@ impl Assembler {
         self.preprocessor
             .set_max_recursion_depth(limits.max_recursion_depth);
         self.preprocessor.set_max_iterations(limits.max_iterations);
+        self.preprocessor
+            .set_max_expanded_bytes(limits.max_expanded_bytes);
+        self.linker.set_max_output_bytes(limits.max_output_bytes);
         self
     }
 
@@ -481,9 +519,30 @@ impl Assembler {
 
     /// Set the optimization level.
     ///
-    /// `OptLevel::Size` (default) prefers shortest encodings. `OptLevel::None`
-    /// disables encoding optimizations for predictable output. Extended
-    /// peephole optimizations (zero-idiom, REX elimination) are planned.
+    /// [`OptLevel::Size`] (the default) picks the shortest encoding using only
+    /// transforms that preserve all architectural state, including FLAGS.
+    /// [`OptLevel::None`] emits the instruction exactly as written.
+    /// [`OptLevel::Aggressive`] additionally enables FLAGS-clobbering rewrites
+    /// such as `mov reg, 0` → `xor reg, reg`; see [`OptLevel`] for when that
+    /// is safe.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asm_rs::{Assembler, Arch, OptLevel};
+    ///
+    /// // Default: FLAGS are preserved, so `mov` stays a `mov`.
+    /// let mut asm = Assembler::new(Arch::X86_64);
+    /// asm.emit("mov eax, 0")?;
+    /// assert_eq!(asm.finish()?.bytes(), &[0xB8, 0x00, 0x00, 0x00, 0x00]);
+    ///
+    /// // Opt in to the zero idiom.
+    /// let mut asm = Assembler::new(Arch::X86_64);
+    /// asm.optimize(OptLevel::Aggressive);
+    /// asm.emit("mov eax, 0")?;
+    /// assert_eq!(asm.finish()?.bytes(), &[0x31, 0xC0]);
+    /// # Ok::<(), asm_rs::AsmError>(())
+    /// ```
     pub fn optimize(&mut self, level: OptLevel) -> &mut Self {
         self.opt_level = level;
         self
@@ -561,8 +620,18 @@ impl Assembler {
         }
         // Run preprocessor to expand macros, loops, and conditionals
         let expanded = self.preprocessor.process(source)?;
-        let mut statements = parse_source(&expanded, self.arch, self.syntax)?;
-        self.process_statements(&mut statements, &expanded)?;
+        // Statements are consumed as they are parsed rather than collected
+        // into a `Vec` first: `Statement` stores its operand list inline, so
+        // buffering a whole program costs hundreds of bytes per instruction
+        // and makes peak memory proportional to the source rather than to the
+        // output it produces.
+        //
+        let tokens = lexer::tokenize_with_syntax(&expanded, self.syntax)?;
+        // Read the dialect out before the closure takes `self` mutably.
+        let (arch, syntax) = (self.arch, self.syntax);
+        parser::parse_streaming(&tokens, arch, syntax, |mut stmt| {
+            self.process_statement(&mut stmt, &expanded)
+        })?;
         Ok(self)
     }
 
@@ -722,7 +791,7 @@ impl Assembler {
     /// Returns [`AsmError::ResourceLimitExceeded`] if the output size limit
     /// would be exceeded.
     pub fn fill(&mut self, count: u32, size: u8, value: i64) -> Result<&mut Self, AsmError> {
-        let total = count as usize * size as usize;
+        let total = (count as usize).saturating_mul(size as usize);
         self.check_output_limit(total)?;
         let mut bytes = Vec::with_capacity(total);
         // GAS semantics: value is a LE integer padded to `size` bytes
@@ -783,7 +852,7 @@ impl Assembler {
     pub fn encode_one(&self, source: &str) -> Result<Vec<u8>, AsmError> {
         use crate::encoder::encode_instruction;
 
-        let tokens = crate::lexer::tokenize(source)?;
+        let tokens = crate::lexer::tokenize_with_syntax(source, self.syntax)?;
         let stmts = crate::parser::parse_with_syntax(&tokens, self.arch, self.syntax)?;
         if stmts.is_empty() {
             return Ok(Vec::new());
@@ -823,14 +892,19 @@ impl Assembler {
     /// # Ok::<(), asm_rs::AsmError>(())
     /// ```
     pub fn reset(&mut self) -> &mut Self {
+        let base = self.linker.base_address();
         self.linker = Linker::new();
+        self.linker.set_base_address(base);
         self.preprocessor = Preprocessor::new();
+        // Re-apply the configured limits — they are configuration, not state.
+        self.limits(self.resource_limits);
         self.errors.clear();
         self.fragment_annotations.clear();
         // listing_enabled is configuration, preserved across resets
         self.statement_count = 0;
         self.label_count = 0;
         self.literal_pool.clear();
+        self.literal_pool_index.clear();
         self.literal_pool_counter = 0;
         self.thumb_func_pending = false;
         self.thumb_labels.clear();
@@ -845,7 +919,10 @@ impl Assembler {
     /// Called by builder methods to enforce `max_output_bytes` eagerly —
     /// *before* allocating the data — rather than only at `finish()` time.
     fn check_output_limit(&mut self, additional: usize) -> Result<(), AsmError> {
-        self.estimated_output_bytes += additional;
+        // Saturating: `.fill`/`.space` sizes are attacker-controlled and can
+        // overflow `usize` on 32-bit targets (wasm32, thumbv7), where the
+        // wrapped total would slip under the limit.
+        self.estimated_output_bytes = self.estimated_output_bytes.saturating_add(additional);
         if self.estimated_output_bytes > self.resource_limits.max_output_bytes {
             return Err(AsmError::ResourceLimitExceeded {
                 resource: String::from("output bytes"),
@@ -886,6 +963,13 @@ impl Assembler {
             }
         }
 
+        // `label_address()` binary-searches this slice. The linker already
+        // yields labels in name order (it stores them in a `BTreeMap`), so
+        // this is a linear-time confirmation of the invariant rather than a
+        // real sort — but it keeps the invariant local to where it is relied
+        // upon instead of spread across two modules.
+        labels.sort_by(|(a, _), (b, _)| a.cmp(b));
+
         // Enforce output size limit
         if bytes.len() > self.resource_limits.max_output_bytes {
             return Err(AsmError::ResourceLimitExceeded {
@@ -919,13 +1003,12 @@ impl Assembler {
         annotations
     }
 
-    fn process_statements(
-        &mut self,
-        statements: &mut [Statement],
-        source: &str,
-    ) -> Result<(), AsmError> {
-        // Check statement count limit (total across all emit() calls)
-        self.statement_count += statements.len();
+    /// Process one parsed statement.
+    ///
+    /// Called from the streaming parse loop, so the statement is encoded and
+    /// dropped before the next one is parsed.
+    fn process_statement(&mut self, stmt: &mut Statement, source: &str) -> Result<(), AsmError> {
+        self.statement_count += 1;
         if self.statement_count > self.resource_limits.max_statements {
             return Err(AsmError::ResourceLimitExceeded {
                 resource: String::from("statements"),
@@ -933,7 +1016,7 @@ impl Assembler {
             });
         }
 
-        for stmt in statements.iter_mut() {
+        {
             match stmt {
                 Statement::Label(name, span) => {
                     self.label_count += 1;
@@ -957,10 +1040,7 @@ impl Assembler {
                     self.resolve_constants_in_instruction(instr);
                     // Transform literal pool operands: =value → label reference
                     self.transform_literal_pool_operands(instr);
-                    // Apply peephole optimizations when OptLevel::Size is active
-                    if self.opt_level == OptLevel::Size {
-                        crate::optimize::optimize_instruction(instr, self.arch);
-                    }
+                    crate::optimize::optimize_instruction(instr, self.arch, self.opt_level);
                     let encode_result = if self.x86_mode == crate::ir::X86Mode::Mode16 {
                         #[cfg(feature = "x86")]
                         {
@@ -1055,7 +1135,7 @@ impl Assembler {
                 Statement::Fill(fill) => {
                     let frag_idx = self.linker.fragment_count();
                     let span = fill.span;
-                    let total = fill.count as usize * fill.size as usize;
+                    let total = (fill.count as usize).saturating_mul(fill.size as usize);
                     self.check_output_limit(total)?;
                     let mut bytes = Vec::with_capacity(total);
                     // GAS semantics: value is a LE integer padded to `size` bytes.
@@ -1204,22 +1284,21 @@ impl Assembler {
             if let Operand::LiteralPoolValue(val) = op {
                 let val = *val;
 
-                // Check for existing pool entry with same value + size (dedup).
-                let label = if let Some(existing) = self
-                    .literal_pool
-                    .iter()
-                    .find(|e| e.value == val && e.size == size)
-                {
-                    existing.label.clone()
-                } else {
-                    let label = alloc::format!(".Lpool_{}", self.literal_pool_counter);
-                    self.literal_pool_counter += 1;
-                    self.literal_pool.push(LiteralPoolEntry {
-                        value: val,
-                        size,
-                        label: label.clone(),
-                    });
-                    label
+                // Check for an existing pool entry with the same value + size.
+                let label = match self.literal_pool_index.get(&(val, size)) {
+                    Some(&idx) => self.literal_pool[idx].label.clone(),
+                    None => {
+                        let label = alloc::format!(".Lpool_{}", self.literal_pool_counter);
+                        self.literal_pool_counter += 1;
+                        self.literal_pool_index
+                            .insert((val, size), self.literal_pool.len());
+                        self.literal_pool.push(LiteralPoolEntry {
+                            value: val,
+                            size,
+                            label: label.clone(),
+                        });
+                        label
+                    }
                 };
 
                 *op = Operand::Label(label);
@@ -1248,6 +1327,7 @@ impl Assembler {
 
         // Drain and emit each entry.
         let entries: Vec<LiteralPoolEntry> = core::mem::take(&mut self.literal_pool);
+        self.literal_pool_index.clear();
         for entry in &entries {
             self.linker.add_label(&entry.label, span)?;
             let bytes = match entry.size {
@@ -1371,12 +1451,6 @@ impl Assembler {
 
         Ok(())
     }
-}
-
-/// Parse source text into statements.
-fn parse_source(source: &str, arch: Arch, syntax: Syntax) -> Result<Vec<Statement>, AsmError> {
-    let tokens = lexer::tokenize(source)?;
-    parser::parse_with_syntax(&tokens, arch, syntax)
 }
 
 /// Extract the source text for a span from the original source string.

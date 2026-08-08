@@ -1,14 +1,8 @@
----
-layout: default
-title: RISC-V
----
-
-# RISC-V Instruction Reference
-
-Complete reference for all RISC-V instructions supported by asm-rs,
-covering RV32I/RV64I base ISAs and the M, A, F, D, V, and C extensions.
-
----
++++
+title = "RISC-V"
+description = "RISC-V instruction reference: RV32I/RV64I base ISA plus the M, A, C, F/D and V extensions with automatic compression."
+weight = 5
++++
 
 ## Notation
 
@@ -35,8 +29,6 @@ covering RV32I/RV64I base ISAs and the M, A, F, D, V, and C extensions.
 | `s4` | x20 | `s5` | x21 | `s6` | x22 | `s7` | x23 |
 | `s8` | x24 | `s9` | x25 | `s10` | x26 | `s11` | x27 |
 | `t3` | x28 | `t4` | x29 | `t5` | x30 | `t6` | x31 |
-
----
 
 ## Base Integer ISA (RV32I)
 
@@ -126,8 +118,6 @@ or    rd, rs1, rs2             # OR
 and   rd, rs1, rs2             # AND
 ```
 
----
-
 ## RV64I Extensions
 
 W-suffix instructions operate on the lower 32 bits and sign-extend the result:
@@ -143,8 +133,6 @@ sllw  rd, rs1, rs2             # Shift left word
 srlw  rd, rs1, rs2             # Shift right logical word
 sraw  rd, rs1, rs2             # Shift right arithmetic word
 ```
-
----
 
 ## M Extension (Multiply / Divide)
 
@@ -168,8 +156,6 @@ divuw rd, rs1, rs2             # Divide word (unsigned)
 remw  rd, rs1, rs2             # Remainder word (signed)
 remuw rd, rs1, rs2             # Remainder word (unsigned)
 ```
-
----
 
 ## A Extension (Atomics)
 
@@ -204,8 +190,6 @@ amoswap.w.rl   rd, rs2, (rs1) # Release
 amoswap.w.aqrl rd, rs2, (rs1) # Acquire-release
 ```
 
----
-
 ## CSR Instructions
 
 ### Standard CSR Operations
@@ -234,8 +218,6 @@ csrci csr, uimm5               # Clear bits (immediate)
 ~50 named CSRs are supported (e.g., `mstatus`, `mtvec`, `mepc`, `mcause`,
 `mhartid`, `cycle`, `time`, `instret`, etc.).
 
----
-
 ## System
 
 ```asm
@@ -254,8 +236,6 @@ wfi                            # Wait for interrupt
 sfence.vma rs1, rs2            # Supervisor fence (address + ASID)
 sfence.vma                     # Full TLB flush
 ```
-
----
 
 ## Pseudo-Instructions
 
@@ -305,8 +285,6 @@ li    a0, 0xDEADBEEFCAFEBABE   # Up to 8 instructions (32 bytes)
 
 > The `li` decomposition correctly handles sign-extension edge cases
 > (e.g., `li a0, 0x80000000` produces positive 2^31 on RV64).
-
----
 
 ## C Extension (Compressed — 16-bit)
 
@@ -409,8 +387,6 @@ c.bnez  a0, far_label         # when target exceeds ±256 B
 c.j     far_label              # Widens to JAL (4B, ±1 MiB)
                                 # when target exceeds ±2 KB
 ```
-
----
 
 ## Memory Addressing
 

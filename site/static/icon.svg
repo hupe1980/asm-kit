@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="asm-rs">
+  <!-- Square mark for the header and favicon: the wordmark in logo.svg is a
+       wide lockup and turns to mush below ~120px. The three bars stand for
+       instruction encodings of different widths, which is the thing this
+       library produces. -->
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="#ff8a5c"/>
+  <g fill="#1a0f0a">
+    <rect x="7"  y="9"  width="18" height="3.4" rx="1.7"/>
+    <rect x="7"  y="14.3" width="12" height="3.4" rx="1.7"/>
+    <rect x="7"  y="19.6" width="15" height="3.4" rx="1.7"/>
+  </g>
+</svg>

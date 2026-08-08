@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% import "docs-base.html" as docs %}
+
+{% block content %}
+<div class="wrap docs-layout">
+  {{ docs::sidebar(current=section.permalink) }}
+  <article class="prose">
+    <h1>{{ section.title }}</h1>
+    {%- if section.description %}<p class="lede">{{ section.description }}</p>{% endif %}
+    {{ section.content | safe }}
+
+    {%- if section.pages | length > 0 %}
+    <div class="cards cards-compact">
+      {%- for p in section.pages %}
+      <a class="card card-link" href="{{ p.permalink | safe }}">
+        <h3>{{ p.title }}</h3>
+        {%- if p.description %}<p>{{ p.description }}</p>{% endif %}
+      </a>
+      {%- endfor %}
+    </div>
+    {%- endif %}
+  </article>
+  {{ docs::toc(headings=section.toc) }}
+</div>
+{% endblock content %}

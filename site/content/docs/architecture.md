@@ -1,14 +1,8 @@
----
-layout: default
-title: Architecture
----
-
-# Architecture Guide
-
-Deep dive into the asm-rs assembler pipeline, module responsibilities,
-encoding architecture, and testing strategy.
-
----
++++
+title = "Architecture"
+description = "How asm-rs works inside: the preprocessor, lexer, parser, IR, optimizer, per-architecture encoders and the fragment-based linker."
+weight = 4
++++
 
 ## Pipeline Overview
 
@@ -22,8 +16,8 @@ Source Text
        │
        ▼
 ┌─────────┐
-│  Lexer  │  Zero-copy tokenization into Token<'src>
-└────┬────┘  with source spans for error reporting
+│  Lexer  │  Zero-copy tokenization into Token<'src> with source spans;
+└────┬────┘  dialect-aware (`#` = immediate in UAL, comment elsewhere)
      │
      ▼
 ┌─────────┐
@@ -32,8 +26,8 @@ Source Text
      │
      ▼
 ┌───────────┐
-│ Optimizer │  Peephole optimizations (zero-idiom, MOV narrowing,
-└─────┬─────┘  AND→TEST conversion) when OptLevel::Size is active
+│ Optimizer │  Peephole optimizations (MOV narrowing, REX elimination,
+└─────┬─────┘  AND→TEST) — plus the zero idiom at OptLevel::Aggressive
       │
       ▼
 ┌──────────┐
@@ -48,8 +42,6 @@ Source Text
      ▼
   Output Bytes + Labels + Applied Relocations
 ```
-
----
 
 ## Module Responsibilities
 
@@ -161,19 +153,28 @@ When `Syntax::Att` is active, the parser switches to AT&T operand parsing:
 
 ### Optimizer
 
-The peephole optimizer runs after parsing, before encoding.
-It transforms individual instructions for shorter machine code when
-`OptLevel::Size` is active.
+The peephole optimizer runs after parsing, before encoding. It transforms
+individual instructions for shorter machine code.
 
-| Pattern | Replacement | Savings |
-|:--------|:------------|:--------|
-| `mov reg64, 0` / `mov reg32, 0` | `xor reg32, reg32` | 5–7 → 2 bytes |
-| `mov reg64, small_imm` (0 < imm ≤ u32::MAX) | `mov reg32, imm32` | 7 → 5 bytes |
-| `and reg64, u32_imm` | `and reg32, u32_imm` | Saves 1 byte (REX removed) |
-| `and reg, reg` (same register) | `test reg, reg` | Equivalent, better for flags |
+Levels are separated by *what a transform is allowed to change*, not by how
+hard it tries. `OptLevel::Size` — the default — is restricted to transforms
+that are **observationally equivalent**, leaving registers, memory and FLAGS
+exactly as the original instruction would. That property is what makes it safe
+to enable by default: output is shorter, but never behaves differently.
 
-**Design**: operates on IR `Statement` level, each optimization is a pure function
-returning `Option<Statement>`, easy to extend.
+| Pattern | Replacement | Savings | Level |
+|:--------|:------------|:--------|:------|
+| `mov reg64, small_imm` (0 ≤ imm ≤ u32::MAX) | `mov reg32, imm32` | 7 → 5 bytes | `Size` |
+| `and reg64, u32_imm` | `and reg32, u32_imm` | 1 byte (REX removed) | `Size` |
+| `and reg, reg` (same register) | `test reg, reg` | Same size, drops the register write | `Size` |
+| `mov reg64, 0` / `mov reg32, 0` | `xor reg32, reg32` | 5–7 → 2 bytes | `Aggressive` |
+
+The zero idiom sits at `Aggressive` because `xor` writes FLAGS and `mov` does
+not, so applying it unconditionally would corrupt `cmp` / `mov` / `setcc`
+sequences.
+
+**Design**: operates on the IR `Instruction`; each optimization is a small
+predicate-plus-rewrite function taking `&mut Instruction`, easy to extend.
 
 ---
 
@@ -301,8 +302,6 @@ The linker collects encoded fragments and resolves references:
 | `ThumbBranch8/11` | Thumb | 16-bit branches |
 | `ThumbBl/BranchW` | Thumb | 32-bit branches |
 
----
-
 ## Encoding Format Reference
 
 ### x86-64 Instruction Format
@@ -345,17 +344,31 @@ The linker collects encoded fragments and resolves references:
 
 Required when using RSP/R12 as base or scaled index addressing.
 
----
-
 ## Testing Strategy
 
-The project maintains an extensive test suite across multiple categories:
+Correctness for an assembler means the bytes mean what the source said. That
+cannot be established by comparing output to itself, so most of the effort goes
+into checking it against something independent.
 
-- **Unit tests** — per-module tests for all components
-- **Integration tests** — end-to-end through the public API
-- **Cross-validation** — multi-decoder verification (iced-x86, yaxpeax-arm, bad64, riscv-decode)
-- **Property-based** — proptest: no-panic, determinism, length bounds
-- **Fuzz testing** — `cargo-fuzz` targets for all architectures
-- **Code coverage** — 80% minimum threshold enforced in CI
+| Layer | What it establishes |
+|:------|:--------------------|
+| **Unit tests** | Per-module behaviour, including exact encodings |
+| **Integration tests** | End-to-end behaviour through the public API |
+| **Encoding cross-validation** | Each instruction is assembled standalone and decoded back by iced-x86 (x86/x86-64), bad64 and yaxpeax-arm (AArch64/ARM/Thumb), and riscv-decode (RISC-V) |
+| **Relocation cross-validation** | Branch displacements are swept across each encoding's full range — the sign boundary and both extremes included — and the address the reference decoder computes is compared to the intended target |
+| **Differential fuzzing** | A fuzz target generates a branch to a known address and asks a decoder where it actually goes |
+| **Panic fuzzing** | Per-architecture `cargo-fuzz` targets assert the assembler never panics on arbitrary input |
+| **Property-based** | proptest: determinism, absence of panics, output length bounds |
+| **Documentation** | Every instruction in the ISA reference pages is assembled by a test, so the docs cannot drift from the implementation |
+| **Coverage** | 80% line minimum, enforced in CI |
 
-Zero warnings, zero clippy warnings, Miri clean.
+Two of these deserve emphasis, because the bugs they catch are invisible to the
+others. Encoding tests assemble one instruction at a time, so they never
+exercise the linker; relocation cross-validation does. And a relocation bug is
+typically correct near zero displacement and wrong far away, so only a sweep
+across the full range — or a fuzzer choosing displacements adversarially — will
+find it.
+
+The crate builds with zero warnings under `clippy -D warnings`, and
+`#![forbid(unsafe_code)]` makes memory safety a property of the build rather
+than of the test suite.

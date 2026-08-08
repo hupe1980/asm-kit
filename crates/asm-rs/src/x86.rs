@@ -172,7 +172,7 @@ fn validate_imm_u16(imm: i128, span: crate::error::Span) -> Result<(), AsmError>
 
 /// Returns true if any operand is a ZMM register.
 /// Used as a guard to dispatch to EVEX-encoded forms instead of VEX.
-fn has_zmm(ops: &[Operand]) -> bool {
+fn has_zmm(ops: &OperandList) -> bool {
     ops.iter()
         .any(|op| matches!(op, Operand::Register(r) if r.is_zmm()))
 }
@@ -186,7 +186,7 @@ fn has_zmm(ops: &[Operand]) -> bool {
 pub(crate) fn dispatch_x86_64(
     mnemonic: &str,
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<crate::encoder::Relocation>,
     relax_info: &mut Option<crate::encoder::RelaxInfo>,
@@ -6910,7 +6910,7 @@ pub(crate) fn dispatch_x86_64(
 /// ModR/M encoding: reg-field = second operand (register), r/m-field = first operand.
 fn encode_rm_reg(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pfx: u8,
     opcode: &[u8],
@@ -7000,7 +7000,7 @@ fn encode_rm_reg(
 /// IN — Input from port.
 ///
 /// Forms: `in al/ax/eax, imm8` or `in al/ax/eax, dx`
-fn encode_in(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_in(buf: &mut InstrBytes, ops: &OperandList, instr: &Instruction) -> Result<(), AsmError> {
     if ops.len() != 2 {
         return Err(invalid_operands(
             "in",
@@ -7055,7 +7055,11 @@ fn encode_in(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Resu
 /// OUT — Output to port.
 ///
 /// Forms: `out imm8, al/ax/eax` or `out dx, al/ax/eax`
-fn encode_out(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Result<(), AsmError> {
+fn encode_out(
+    buf: &mut InstrBytes,
+    ops: &OperandList,
+    instr: &Instruction,
+) -> Result<(), AsmError> {
     if ops.len() != 2 {
         return Err(invalid_operands(
             "out",
@@ -7112,7 +7116,7 @@ fn encode_out(buf: &mut InstrBytes, ops: &[Operand], instr: &Instruction) -> Res
 /// Form: `enter imm16, imm8`
 fn encode_enter(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -7153,7 +7157,7 @@ fn encode_enter(
 ///   JMP rel32    → long jump to actual target
 fn encode_jecxz(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<crate::encoder::RelaxInfo>,
@@ -7214,7 +7218,7 @@ fn encode_jecxz(
 /// Same relaxation strategy as JECXZ but without the address-size override prefix.
 fn encode_jrcxz(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<crate::encoder::RelaxInfo>,
@@ -7265,7 +7269,7 @@ fn encode_jrcxz(
 /// RDSEED: `0F C7 /7` (ModR/M mod=11, digit=7)
 fn encode_rdrand_rdseed(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -7317,7 +7321,7 @@ fn encode_rdrand_rdseed(
 /// Only 32-bit and 64-bit operand sizes are supported.
 fn encode_adcx_adox(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     prefix: u8,
     reloc: &mut Option<Relocation>,
@@ -7391,7 +7395,7 @@ fn encode_adcx_adox(
 /// CMPXCHG16B: `REX.W 0F C7 /1` (memory operand only)
 fn encode_cmpxchg_wide(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     wide: bool,
     reloc: &mut Option<Relocation>,
@@ -7438,7 +7442,7 @@ fn encode_cmpxchg_wide(
 /// REX.W selects 64-bit register operand.
 fn encode_fsgsbase(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -7484,7 +7488,7 @@ fn encode_fsgsbase(
 /// wide: when true, emit REX.W for 64-bit variants (fxsave64, xsave64, etc.)
 fn encode_0f_ae_mem(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
     wide: bool,
@@ -7526,7 +7530,7 @@ fn encode_0f_ae_mem(
 /// wide: when true, emit REX.W for 64-bit variants
 fn encode_0f_c7_mem(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
     wide: bool,
@@ -7567,7 +7571,7 @@ fn encode_0f_c7_mem(
 /// Encoding: `C6 F8 imm8`
 fn encode_xabort(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 1 {
@@ -7606,7 +7610,7 @@ fn encode_xabort(
 /// The rel32 is relative to the end of the instruction (6 bytes total).
 fn encode_xbegin(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -7653,7 +7657,7 @@ fn encode_xbegin(
 /// Form: `movnti [mem], r32/r64` → `0F C3 /r`
 fn encode_movnti(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -7697,7 +7701,7 @@ fn encode_movnti(
 /// Store: `movbe [mem], r` → `0F 38 F1 /r`
 fn encode_movbe(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -7758,7 +7762,7 @@ fn encode_movbe(
 ///       `shrd r/m, reg, cl`   → `0F AD /r`
 fn encode_shld_shrd(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     imm_opcode: &[u8],
     cl_opcode: &[u8],

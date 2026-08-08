@@ -1,15 +1,10 @@
----
-layout: default
-title: ARM32
----
++++
+title = "ARM32"
+description = "ARM32 (A32) instruction reference: condition codes, the barrel shifter, register lists, load/store and literal pools."
+weight = 3
++++
 
-# ARM32 (A32) Instruction Reference
-
-Complete reference for all ARM32 instructions supported by asm-rs.
-
-See also: [Thumb/Thumb-2 Reference]({{ site.baseurl }}/reference/thumb).
-
----
+See also: [Thumb/Thumb-2 Reference](@/docs/reference/thumb.md).
 
 ## Notation
 
@@ -25,8 +20,6 @@ See also: [Thumb/Thumb-2 Reference]({{ site.baseurl }}/reference/thumb).
 | `{reglist}` | Register list, e.g. `{R0-R7, LR}` |
 | `cond` | Optional condition suffix (see below) |
 | `S` | Optional flag-setting suffix |
-
----
 
 ## Condition Codes
 
@@ -52,8 +45,6 @@ condition suffix. The default is `al` (always).
 | `al` | Always (default) | — |
 
 Example: `addeq r0, r1, r2` — adds only when zero flag is set.
-
----
 
 ## Data Processing
 
@@ -131,8 +122,6 @@ ror   r0, r1, #4              @ Rotate right
 lsl   r0, r1, r2              @ Register shift amount
 ```
 
----
-
 ## Multiply
 
 ```asm
@@ -150,8 +139,6 @@ smull r0, r1, r2, r3          @ Signed: {r1,r0} = r2 * r3
 umlal r0, r1, r2, r3          @ Unsigned multiply-accumulate long
 smlal r0, r1, r2, r3          @ Signed multiply-accumulate long
 ```
-
----
 
 ## Bit Manipulation
 
@@ -171,8 +158,6 @@ sbfx  r0, r1, #4, #8          @ Signed bit field extract
 ubfx  r0, r1, #4, #8          @ Unsigned bit field extract
 ```
 
----
-
 ## Extend
 
 ```asm
@@ -181,8 +166,6 @@ uxth  r0, r1                  @ Unsigned extend halfword (16 → 32)
 sxtb  r0, r1                  @ Signed extend byte
 sxth  r0, r1                  @ Signed extend halfword
 ```
-
----
 
 ## Load / Store
 
@@ -217,8 +200,6 @@ ldr   r0, [r1], #4            @ Post-index: load, then r1 += 4
 str   r0, [r1], #-4           @ Post-index store
 ```
 
----
-
 ## Exclusive Access
 
 ```asm
@@ -231,8 +212,6 @@ strexb  r0, r1, [r2]          @ Store exclusive byte
 strexh  r0, r1, [r2]          @ Store exclusive halfword
 strexd  r0, r2, r3, [r4]      @ Store exclusive doubleword
 ```
-
----
 
 ## Block Transfer (PUSH / POP / LDM / STM)
 
@@ -251,8 +230,6 @@ stmia r0!, {r1-r4}            @ Store with writeback
 stmdb r0!, {r1-r4}            @ Decrement Before (used for PUSH)
 ```
 
----
-
 ## Branch
 
 ```asm
@@ -268,8 +245,6 @@ blx   r0                      @ Branch, link, and exchange
 adr   r0, label               @ Load PC-relative address (ADD/SUB Rd, PC, #offset)
 ```
 
----
-
 ## System
 
 ```asm
@@ -283,8 +258,6 @@ dmb                            @ Data memory barrier
 dsb                            @ Data synchronization barrier
 isb                            @ Instruction synchronization barrier
 ```
-
----
 
 ## Literal Pools
 
@@ -300,8 +273,6 @@ ldr   r1, =42                 @ Small constant
 - Identical constants share a single pool entry (deduplication)
 - Range limit: ±4,092 bytes from the instruction
 - Pool flushed at `.ltorg`/`.pool` or automatically at end of assembly
-
----
 
 ## Memory Addressing Summary
 

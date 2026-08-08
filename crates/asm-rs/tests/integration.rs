@@ -2801,13 +2801,9 @@ fn preprocessor_macro_with_default_parameter() {
 load_val
 "#;
     let bytes = assemble(src, Arch::X86_64).unwrap();
-    // mov eax, 0 → 31 C0 (optimized to xor with OptLevel::Size default)
-    // or B8 00 00 00 00 without optimization... actually the preprocessor
-    // substitutes text, so "mov eax, 0" is what the assembler sees.
-    // With OptLevel::Size (default), this stays as mov eax, 0 = B8 00 00 00 00
-    // The peephole only converts to XOR if it matches the right pattern.
-    // Actually the optimizer should fire: mov eax, 0 → xor eax, eax
-    assert_eq!(bytes, vec![0x31, 0xC0]);
+    // The defaulted parameters expand to `mov eax, 0`, which the default
+    // optimization level emits verbatim: B8 00 00 00 00.
+    assert_eq!(bytes, vec![0xB8, 0x00, 0x00, 0x00, 0x00]);
 }
 
 #[test]
@@ -2941,11 +2937,11 @@ fn preprocessor_equ_integration() {
 "#;
     let bytes = assemble(src, Arch::X86_64).unwrap();
     // mov eax, 60 = B8 3C 00 00 00
-    // mov edi, 0 → xor edi, edi (optimised) = 31 FF
-    // syscall = 0F 05
+    // mov edi, 0  = BF 00 00 00 00 (FLAGS-preserving default level)
+    // syscall     = 0F 05
     assert_eq!(
         bytes,
-        vec![0xB8, 0x3C, 0x00, 0x00, 0x00, 0x31, 0xFF, 0x0F, 0x05]
+        vec![0xB8, 0x3C, 0x00, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x05]
     );
 }
 
@@ -2992,9 +2988,10 @@ push_all rbx, r12, r13
 
 #[test]
 fn optimizer_zero_idiom_mov_reg_zero() {
-    // With OptLevel::Size, mov rax, 0 should become xor eax, eax (2 bytes vs 7)
+    // The zero idiom writes FLAGS, so it needs OptLevel::Aggressive.
+    // mov rax, 0 then becomes xor eax, eax (2 bytes vs 7).
     let mut asm = Assembler::new(Arch::X86_64);
-    asm.optimize(OptLevel::Size);
+    asm.optimize(OptLevel::Aggressive);
     asm.emit("mov rax, 0\nret").unwrap();
     let result = asm.finish().unwrap();
     // xor eax, eax = 31 C0, ret = C3
@@ -3004,7 +3001,7 @@ fn optimizer_zero_idiom_mov_reg_zero() {
 #[test]
 fn optimizer_zero_idiom_multiple_regs() {
     let mut asm = Assembler::new(Arch::X86_64);
-    asm.optimize(OptLevel::Size);
+    asm.optimize(OptLevel::Aggressive);
     asm.emit("mov rcx, 0\nmov rdx, 0\nret").unwrap();
     let result = asm.finish().unwrap();
     // xor ecx, ecx = 31 C9, xor edx, edx = 31 D2, ret = C3
@@ -3015,7 +3012,7 @@ fn optimizer_zero_idiom_multiple_regs() {
 fn optimizer_zero_idiom_32bit_regs() {
     // mov eax, 0 should also be optimized to xor eax, eax
     let mut asm = Assembler::new(Arch::X86_64);
-    asm.optimize(OptLevel::Size);
+    asm.optimize(OptLevel::Aggressive);
     asm.emit("mov eax, 0\nret").unwrap();
     let result = asm.finish().unwrap();
     assert_eq!(result.bytes(), &[0x31, 0xC0, 0xC3]);
@@ -3089,9 +3086,10 @@ fn optimizer_and_eax_eax_to_test() {
 
 #[test]
 fn optimizer_combined_in_function() {
-    // Real-world pattern: function that zeroes rax and returns
+    // Real-world pattern: function that zeroes rax and returns.
+    // FLAGS are dead across the epilogue here, so Aggressive is safe.
     let mut asm = Assembler::new(Arch::X86_64);
-    asm.optimize(OptLevel::Size);
+    asm.optimize(OptLevel::Aggressive);
     asm.emit(
         r#"
 push rbp
@@ -3117,9 +3115,9 @@ ret
 #[test]
 fn preprocessor_and_optimizer_combined() {
     // Macro that generates zero-initialisation + preprocessor conditional,
-    // with optimizer converting mov reg, 0 → xor
+    // with the aggressive optimizer converting mov reg, 0 → xor
     let mut asm = Assembler::new(Arch::X86_64);
-    asm.optimize(OptLevel::Size);
+    asm.optimize(OptLevel::Aggressive);
     asm.define_preprocessor_symbol("ZERO_INIT", 1);
     asm.emit(
         r#"
@@ -4287,7 +4285,7 @@ fn arm32_add_r0_r1_r2_lsl_3() {
     // ADD R0, R1, R2, LSL 3
     // cond=E|00|0|0100|0|R1|R0|00011|00|0|R2
     // = 0xE0810182
-    let code = assemble("add r0, r1, r2, lsl, 3", Arch::Arm).unwrap();
+    let code = assemble("add r0, r1, r2, lsl #3", Arch::Arm).unwrap();
     assert_eq!(code.len(), 4);
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     // Check condition (AL), register form (bits 27:26 = 00), opcode = ADD (0100)
@@ -4304,7 +4302,7 @@ fn arm32_add_r0_r1_r2_lsl_3() {
 #[test]
 fn arm32_sub_r3_r4_r5_asr_8() {
     // SUB R3, R4, R5, ASR 8
-    let code = assemble("sub r3, r4, r5, asr, 8", Arch::Arm).unwrap();
+    let code = assemble("sub r3, r4, r5, asr #8", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 21) & 0xF, 0x2); // SUB opcode
     assert_eq!((word >> 16) & 0xF, 4); // Rn = R4
@@ -4317,7 +4315,7 @@ fn arm32_sub_r3_r4_r5_asr_8() {
 #[test]
 fn arm32_mov_r0_r1_lsr_16() {
     // MOV R0, R1, LSR 16
-    let code = assemble("mov r0, r1, lsr, 16", Arch::Arm).unwrap();
+    let code = assemble("mov r0, r1, lsr #16", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 21) & 0xF, 0xD); // MOV opcode
     assert_eq!((word >> 12) & 0xF, 0); // Rd = R0
@@ -4329,7 +4327,7 @@ fn arm32_mov_r0_r1_lsr_16() {
 #[test]
 fn arm32_mov_r0_r1_ror_4() {
     // MOV R0, R1, ROR 4
-    let code = assemble("mov r0, r1, ror, 4", Arch::Arm).unwrap();
+    let code = assemble("mov r0, r1, ror #4", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 5) & 0x3, 0b11); // ROR
     assert_eq!((word >> 7) & 0x1F, 4);
@@ -4348,7 +4346,7 @@ fn arm32_mov_r0_r1_rrx() {
 #[test]
 fn arm32_cmp_r0_r1_lsl_2() {
     // CMP R0, R1, LSL 2 — compare with shifted register
-    let code = assemble("cmp r0, r1, lsl, 2", Arch::Arm).unwrap();
+    let code = assemble("cmp r0, r1, lsl #2", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 21) & 0xF, 0xA); // CMP opcode
     assert_eq!((word >> 20) & 0x1, 1); // S=1 (always for CMP)
@@ -4606,7 +4604,7 @@ fn arm32_isb() {
 #[test]
 fn arm32_eor_with_shift() {
     // EOR R0, R1, R2, LSL 1
-    let code = assemble("eor r0, r1, r2, lsl, 1", Arch::Arm).unwrap();
+    let code = assemble("eor r0, r1, r2, lsl #1", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 21) & 0xF, 0x1); // EOR opcode
     assert_eq!((word >> 7) & 0x1F, 1); // shift amount = 1
@@ -4616,7 +4614,7 @@ fn arm32_eor_with_shift() {
 #[test]
 fn arm32_orr_with_shift() {
     // ORR R4, R5, R6, ASR 12
-    let code = assemble("orr r4, r5, r6, asr, 12", Arch::Arm).unwrap();
+    let code = assemble("orr r4, r5, r6, asr #12", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 21) & 0xF, 0xC); // ORR opcode
     assert_eq!((word >> 12) & 0xF, 4); // Rd = R4
@@ -4627,7 +4625,7 @@ fn arm32_orr_with_shift() {
 #[test]
 fn arm32_bic_with_shift() {
     // BIC R0, R0, R1, LSL 8 — clear bits
-    let code = assemble("bic r0, r0, r1, lsl, 8", Arch::Arm).unwrap();
+    let code = assemble("bic r0, r0, r1, lsl #8", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!((word >> 21) & 0xF, 0xE); // BIC opcode
     assert_eq!((word >> 7) & 0x1F, 8);
@@ -5014,9 +5012,15 @@ fn arm32_ldrexh() {
 
 #[test]
 fn arm32_ldrexd() {
-    let code = assemble("ldrexd r4, [r5]", Arch::Arm).unwrap();
+    // LDREXD loads a 64-bit value into a consecutive even/odd register pair,
+    // and UAL names both halves.
+    let code = assemble("ldrexd r4, r5, [r6]", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
-    assert_eq!(word, 0xE1B5_4F9F);
+    assert_eq!(word, 0xE1B6_4F9F);
+
+    // The pair must be even-aligned and consecutive.
+    assert!(assemble("ldrexd r1, r2, [r6]", Arch::Arm).is_err());
+    assert!(assemble("ldrexd r4, r6, [r6]", Arch::Arm).is_err());
 }
 
 #[test]
@@ -5035,9 +5039,10 @@ fn arm32_strexh() {
 
 #[test]
 fn arm32_strexd() {
-    let code = assemble("strexd r0, r1, [r2]", Arch::Arm).unwrap();
+    // STREXD stores the pair <Rt>, <Rt+1>: status, value-low, value-high, base.
+    let code = assemble("strexd r0, r2, r3, [r4]", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
-    assert_eq!(word, 0xE1A2_0F91);
+    assert_eq!(word, 0xE1A4_0F92);
 }
 
 // ── ARM32 LDM/STM writeback control ─────────────────────────────────────
@@ -5071,7 +5076,7 @@ fn arm32_stmdb_writeback() {
 #[test]
 fn arm32_add_reg_shift_lsl() {
     // ADD R0, R1, R2, LSL R3
-    let code = assemble("add r0, r1, r2, lsl, r3", Arch::Arm).unwrap();
+    let code = assemble("add r0, r1, r2, lsl r3", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!(word, 0xE081_0312);
 }
@@ -5079,7 +5084,7 @@ fn arm32_add_reg_shift_lsl() {
 #[test]
 fn arm32_and_reg_shift_lsr() {
     // AND R0, R0, R1, LSR R2
-    let code = assemble("and r0, r0, r1, lsr, r2", Arch::Arm).unwrap();
+    let code = assemble("and r0, r0, r1, lsr r2", Arch::Arm).unwrap();
     let word = u32::from_le_bytes(code[0..4].try_into().unwrap());
     assert_eq!(word, 0xE000_0231);
 }

@@ -77,14 +77,44 @@ pub enum Syntax {
 }
 
 /// Optimization level for encoding.
+///
+/// The levels differ in what an optimization is allowed to change, not just in
+/// how hard it tries:
+///
+/// | Level | May shrink encodings | May change architectural state |
+/// |---|---|---|
+/// | [`None`](OptLevel::None) | no | no |
+/// | [`Size`](OptLevel::Size) (default) | yes | no |
+/// | [`Aggressive`](OptLevel::Aggressive) | yes | yes (FLAGS only) |
+///
+/// [`Size`](OptLevel::Size) is the default because every transform it performs
+/// is *observationally equivalent*: the rewritten instruction leaves registers,
+/// memory and FLAGS exactly as the original would.
+///
+/// [`Aggressive`](OptLevel::Aggressive) additionally permits rewrites that
+/// clobber FLAGS — notably
+/// the zero idiom `mov reg, 0` → `xor reg, reg`. That is a real semantic
+/// change: it silently breaks sequences such as
+///
+/// ```text
+/// cmp  eax, ebx
+/// mov  eax, 0     ; must not disturb FLAGS
+/// sete al
+/// ```
+///
+/// so it must be opted into explicitly, and only where FLAGS are known dead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OptLevel {
-    /// No optimizations — predictable output matching reference assembler.
+    /// No optimizations — byte-for-byte predictable output.
     None,
-    /// Prefer shortest encodings (default).
+    /// Prefer shortest encodings, but only via transforms that preserve all
+    /// architectural state including FLAGS (default).
     #[default]
     Size,
+    /// Also allow transforms that clobber FLAGS (e.g. the `mov reg, 0` zero
+    /// idiom). Only safe when FLAGS are dead after the rewritten instruction.
+    Aggressive,
 }
 
 /// x86/x64 register.
@@ -572,6 +602,8 @@ pub enum Register {
     A64W30,
     /// AArch64 WZR — zero register (32-bit).
     A64Wzr,
+    /// AArch64 WSP — stack pointer (32-bit view).
+    A64Wsp,
 
     // ── AArch64 SIMD/FP registers (V0–V31, 128-bit) ────────
     /// AArch64 128-bit SIMD/FP register V0.
@@ -1423,7 +1455,7 @@ impl Register {
             A64W0 | A64W1 | A64W2 | A64W3 | A64W4 | A64W5 | A64W6 | A64W7 | A64W8 | A64W9
             | A64W10 | A64W11 | A64W12 | A64W13 | A64W14 | A64W15 | A64W16 | A64W17 | A64W18
             | A64W19 | A64W20 | A64W21 | A64W22 | A64W23 | A64W24 | A64W25 | A64W26 | A64W27
-            | A64W28 | A64W29 | A64W30 | A64Wzr => 32,
+            | A64W28 | A64W29 | A64W30 | A64Wzr | A64Wsp => 32,
             // AArch64 SIMD/FP registers — V and Q are 128-bit
             A64V0 | A64V1 | A64V2 | A64V3 | A64V4 | A64V5 | A64V6 | A64V7 | A64V8 | A64V9
             | A64V10 | A64V11 | A64V12 | A64V13 | A64V14 | A64V15 | A64V16 | A64V17 | A64V18
@@ -1672,6 +1704,47 @@ impl Register {
         }
     }
 
+    /// Whether this is the AArch64 stack pointer (`SP` / `WSP`).
+    ///
+    /// Register number 31 is *encoding-dependent* on AArch64: it names the
+    /// stack pointer in the add/sub immediate, add/sub extended-register and
+    /// load/store base positions, and the zero register everywhere else.
+    /// Encoders must therefore distinguish `SP` from `XZR` rather than looking
+    /// only at [`a64_reg_num`](Self::a64_reg_num), or they will silently emit
+    /// an instruction that discards its result.
+    #[must_use]
+    pub fn is_a64_sp(self) -> bool {
+        matches!(self, Register::A64Sp | Register::A64Wsp)
+    }
+
+    /// The ARM32 register with the given 4-bit number (0–15).
+    ///
+    /// Inverse of [`arm_reg_num`](Self::arm_reg_num); used to expand register
+    /// ranges such as `{r0-r7}`.
+    #[must_use]
+    pub fn from_arm_reg_num(n: u8) -> Option<Self> {
+        use Register::*;
+        Some(match n {
+            0 => ArmR0,
+            1 => ArmR1,
+            2 => ArmR2,
+            3 => ArmR3,
+            4 => ArmR4,
+            5 => ArmR5,
+            6 => ArmR6,
+            7 => ArmR7,
+            8 => ArmR8,
+            9 => ArmR9,
+            10 => ArmR10,
+            11 => ArmR11,
+            12 => ArmR12,
+            13 => ArmSp,
+            14 => ArmLr,
+            15 => ArmPc,
+            _ => return None,
+        })
+    }
+
     /// Whether this is an AArch64 register.
     #[must_use]
     pub fn is_aarch64(self) -> bool {
@@ -1743,6 +1816,7 @@ impl Register {
                 | A64W29
                 | A64W30
                 | A64Wzr
+                | A64Wsp
                 | A64V0
                 | A64V1
                 | A64V2
@@ -2022,7 +2096,7 @@ impl Register {
             A64X28 | A64W28 => 28,
             A64X29 | A64W29 => 29,
             A64X30 | A64W30 => 30,
-            A64Sp | A64Xzr | A64Wzr => 31,
+            A64Sp | A64Xzr | A64Wzr | A64Wsp => 31,
             // SIMD/FP registers share the same 0–31 numbering
             A64V0 | A64Q0 | A64D0 | A64S0 | A64H0 | A64B0 => 0,
             A64V1 | A64Q1 | A64D1 | A64S1 | A64H1 | A64B1 => 1,
@@ -3115,6 +3189,14 @@ impl Expr {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Operand {
+    /// No operand.
+    ///
+    /// Fills the unused slots of an [`OperandList`], and is what indexing past
+    /// the end of one yields. Operand counts come from parsed input, so an
+    /// encoder that indexes further than the instruction actually goes must
+    /// produce a diagnostic rather than panic — every operand-extraction
+    /// helper rejects this variant, so the error falls out naturally.
+    Missing,
     /// A register operand.
     Register(Register),
     /// An immediate value.
@@ -3136,11 +3218,319 @@ pub enum Operand {
     VectorRegister(Register, VectorArrangement),
     /// SVE predicate register with qualifier (`P0/M`, `P0/Z`).
     SvePredicate(Register, SvePredQual),
+    /// A single lane of an AArch64 vector register: `V0.S[0]`.
+    ///
+    /// Element accesses name one lane rather than an arrangement, so they
+    /// carry an element *size* plus an index instead of a
+    /// [`VectorArrangement`].
+    VectorElement(Register, ElementSize, u8),
+    /// An ARM32 program status register with a field selector
+    /// (`cpsr_f`, `spsr_cxsf`, ...), as used by `MSR` and `MRS`.
+    PsrField(PsrField),
+    /// A barrel-shift or register-extend modifier applied to the preceding
+    /// operand (ARM32, Thumb, AArch64).
+    ///
+    /// UAL writes these as a trailing operand — `add x0, x1, x2, lsl #3` is
+    /// four operands, the last being `lsl #3` — so they are modelled the same
+    /// way rather than being folded into the register operand. That keeps the
+    /// IR shaped like the source and lets a shift attach to an immediate
+    /// (`movz x0, #0x5678, lsl #16`) as naturally as to a register.
+    Shift(ShiftOp, ShiftAmount),
+}
+
+/// The element size of an AArch64 vector lane access (`V0.S[0]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ElementSize {
+    /// Byte (`.B`) — 16 lanes.
+    B,
+    /// Half-word (`.H`) — 8 lanes.
+    H,
+    /// Single-word (`.S`) — 4 lanes.
+    S,
+    /// Double-word (`.D`) — 2 lanes.
+    D,
+}
+
+impl ElementSize {
+    /// Parse a lane-size suffix. Input must already be lowercase.
+    #[must_use]
+    pub fn from_lower(s: &str) -> Option<Self> {
+        Some(match s {
+            "b" => ElementSize::B,
+            "h" => ElementSize::H,
+            "s" => ElementSize::S,
+            "d" => ElementSize::D,
+            _ => return None,
+        })
+    }
+
+    /// Number of lanes of this size in a 128-bit vector register.
+    #[must_use]
+    pub fn lane_count(self) -> u8 {
+        match self {
+            ElementSize::B => 16,
+            ElementSize::H => 8,
+            ElementSize::S => 4,
+            ElementSize::D => 2,
+        }
+    }
+
+    /// The `imm5` lane selector shared by `INS`, `UMOV`, `SMOV` and `DUP`.
+    ///
+    /// The size is encoded in the position of the lowest set bit, with the
+    /// index sitting above it — so `imm5` names both at once.
+    #[must_use]
+    pub fn imm5(self, index: u8) -> u32 {
+        let index = u32::from(index);
+        match self {
+            ElementSize::B => (index << 1) | 0b1,
+            ElementSize::H => (index << 2) | 0b10,
+            ElementSize::S => (index << 3) | 0b100,
+            ElementSize::D => (index << 4) | 0b1000,
+        }
+    }
+
+    /// The `imm4` source-lane selector used by `INS` (element).
+    #[must_use]
+    pub fn imm4(self, index: u8) -> u32 {
+        let index = u32::from(index);
+        match self {
+            ElementSize::B => index,
+            ElementSize::H => index << 1,
+            ElementSize::S => index << 2,
+            ElementSize::D => index << 3,
+        }
+    }
+}
+
+impl fmt::Display for ElementSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ElementSize::B => "b",
+            ElementSize::H => "h",
+            ElementSize::S => "s",
+            ElementSize::D => "d",
+        })
+    }
+}
+
+/// An ARM32 program status register together with the byte fields an `MSR`
+/// writes to it.
+///
+/// The field suffix is not decoration: `msr cpsr_f, r0` updates only the
+/// condition flags, while `msr cpsr_c, r0` can change the processor mode and
+/// interrupt masks. Encoding one as the other would be a silent behaviour
+/// change, so the selector is carried through the IR rather than defaulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PsrField {
+    /// `true` for `SPSR`, `false` for `CPSR`.
+    pub saved: bool,
+    /// Field mask, in the bit order the instruction encodes it:
+    /// bit 0 = `c` (control), 1 = `x` (extension), 2 = `s` (status),
+    /// 3 = `f` (flags).
+    pub mask: u8,
+}
+
+impl PsrField {
+    /// Parse `cpsr` / `spsr`, optionally suffixed with `_` and any combination
+    /// of the field letters `c`, `x`, `s`, `f` (or `_all`). Input must already
+    /// be lowercase.
+    ///
+    /// A bare `cpsr` selects the `f` and `c` fields, matching GNU `as`, which
+    /// keeps the pre-UAL spelling meaning what it always did.
+    #[must_use]
+    pub fn from_lower(s: &str) -> Option<Self> {
+        let (name, suffix) = match s.split_once('_') {
+            Some((n, rest)) => (n, Some(rest)),
+            None => (s, None),
+        };
+        let saved = match name {
+            "cpsr" => false,
+            "spsr" => true,
+            _ => return None,
+        };
+        let mask = match suffix {
+            None => 0b1001,
+            Some("all") => 0b1111,
+            Some(fields) => {
+                let mut m = 0u8;
+                for ch in fields.chars() {
+                    m |= match ch {
+                        'c' => 0b0001,
+                        'x' => 0b0010,
+                        's' => 0b0100,
+                        'f' => 0b1000,
+                        _ => return None,
+                    };
+                }
+                m
+            }
+        };
+        Some(Self { saved, mask })
+    }
+}
+
+impl fmt::Display for PsrField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.saved { "spsr" } else { "cpsr" })?;
+        if self.mask != 0b1001 {
+            f.write_str("_")?;
+            for (bit, ch) in [(0b0001, 'c'), (0b0010, 'x'), (0b0100, 's'), (0b1000, 'f')] {
+                if self.mask & bit != 0 {
+                    write!(f, "{}", ch)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A barrel-shift or register-extend operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ShiftOp {
+    /// Logical shift left.
+    Lsl,
+    /// Logical shift right.
+    Lsr,
+    /// Arithmetic shift right.
+    Asr,
+    /// Rotate right.
+    Ror,
+    /// Rotate right with extend (ARM32 only; shifts by exactly one through C).
+    Rrx,
+    /// Move shifted left, filling with ones (AArch64 SIMD immediates).
+    Msl,
+    /// Zero-extend byte (AArch64 register extend).
+    Uxtb,
+    /// Zero-extend halfword.
+    Uxth,
+    /// Zero-extend word.
+    Uxtw,
+    /// Zero-extend doubleword (no-op; the canonical LSL form for X registers).
+    Uxtx,
+    /// Sign-extend byte.
+    Sxtb,
+    /// Sign-extend halfword.
+    Sxth,
+    /// Sign-extend word.
+    Sxtw,
+    /// Sign-extend doubleword.
+    Sxtx,
+}
+
+impl ShiftOp {
+    /// Parse a shift/extend keyword. Input must already be lowercase.
+    #[must_use]
+    pub fn from_lower(s: &str) -> Option<Self> {
+        Some(match s {
+            "lsl" => ShiftOp::Lsl,
+            "lsr" => ShiftOp::Lsr,
+            "asr" => ShiftOp::Asr,
+            "ror" => ShiftOp::Ror,
+            "rrx" => ShiftOp::Rrx,
+            "msl" => ShiftOp::Msl,
+            "uxtb" => ShiftOp::Uxtb,
+            "uxth" => ShiftOp::Uxth,
+            "uxtw" => ShiftOp::Uxtw,
+            "uxtx" => ShiftOp::Uxtx,
+            "sxtb" => ShiftOp::Sxtb,
+            "sxth" => ShiftOp::Sxth,
+            "sxtw" => ShiftOp::Sxtw,
+            "sxtx" => ShiftOp::Sxtx,
+            _ => return None,
+        })
+    }
+
+    /// The 2-bit shift-type field used by ARM32 and AArch64 data-processing
+    /// instructions, or `None` for extends (which use a 3-bit `option` field).
+    #[must_use]
+    pub fn shift_type_bits(self) -> Option<u32> {
+        Some(match self {
+            ShiftOp::Lsl => 0b00,
+            ShiftOp::Lsr => 0b01,
+            ShiftOp::Asr => 0b10,
+            // RRX is encoded as ROR with an immediate amount of zero.
+            ShiftOp::Ror | ShiftOp::Rrx => 0b11,
+            _ => return None,
+        })
+    }
+
+    /// The 3-bit `option` field for AArch64 register-extend operands.
+    #[must_use]
+    pub fn extend_option_bits(self) -> Option<u32> {
+        Some(match self {
+            ShiftOp::Uxtb => 0b000,
+            ShiftOp::Uxth => 0b001,
+            ShiftOp::Uxtw => 0b010,
+            ShiftOp::Uxtx => 0b011,
+            ShiftOp::Sxtb => 0b100,
+            ShiftOp::Sxth => 0b101,
+            ShiftOp::Sxtw => 0b110,
+            ShiftOp::Sxtx => 0b111,
+            _ => return None,
+        })
+    }
+}
+
+impl fmt::Display for ShiftOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ShiftOp::Lsl => "lsl",
+            ShiftOp::Lsr => "lsr",
+            ShiftOp::Asr => "asr",
+            ShiftOp::Ror => "ror",
+            ShiftOp::Rrx => "rrx",
+            ShiftOp::Msl => "msl",
+            ShiftOp::Uxtb => "uxtb",
+            ShiftOp::Uxth => "uxth",
+            ShiftOp::Uxtw => "uxtw",
+            ShiftOp::Uxtx => "uxtx",
+            ShiftOp::Sxtb => "sxtb",
+            ShiftOp::Sxth => "sxth",
+            ShiftOp::Sxtw => "sxtw",
+            ShiftOp::Sxtx => "sxtx",
+        };
+        f.write_str(s)
+    }
+}
+
+/// How much a [`ShiftOp`] shifts by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ShiftAmount {
+    /// A constant amount (`lsl #3`).
+    ///
+    /// `i32`, not `i128`: no architecture encodes a shift wider than 63, and
+    /// an `i128` here would force 16-byte alignment on `ShiftAmount`, which
+    /// propagates through `Operand` into every `Instruction`. The signed type
+    /// is kept so a negative amount can be diagnosed rather than wrapped.
+    Immediate(i32),
+    /// A register-supplied amount (`lsl r3`) — ARM32 only.
+    Register(Register),
+    /// No amount given (`rrx`, or a bare `uxtb` whose shift defaults to zero).
+    None,
+}
+
+impl fmt::Display for ShiftAmount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ShiftAmount::Immediate(v) => write!(f, " #{}", v),
+            ShiftAmount::Register(r) => write!(f, " {}", r),
+            ShiftAmount::None => Ok(()),
+        }
+    }
 }
 
 impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Operand::Missing => f.write_str("<none>"),
+            Operand::Shift(op, amount) => write!(f, "{}{}", op, amount),
+            Operand::PsrField(psr) => write!(f, "{}", psr),
+            Operand::VectorElement(r, size, idx) => write!(f, "{}.{}[{}]", r, size, idx),
             Operand::Register(r) => write!(f, "{}", r),
             Operand::Immediate(v) => {
                 if *v < 0 {
@@ -3412,6 +3802,11 @@ pub struct OperandList {
 
 impl OperandList {
     /// Maximum number of operands.
+    ///
+    /// Six is not a round number picked for headroom: instrumenting the whole
+    /// test suite shows real instructions reaching both five and six operands
+    /// (AVX-512 and SVE forms). Lowering it would shrink `Instruction` — the
+    /// list is stored inline — but would reject valid input, so it stays.
     pub const MAX_LEN: usize = 6;
 
     /// Creates a new empty operand list.
@@ -3423,10 +3818,29 @@ impl OperandList {
         }
     }
 
+    /// Appends an operand, returning `false` if the list is already full.
+    ///
+    /// Operand counts come from user input, so callers that parse must use
+    /// this and report a diagnostic rather than relying on [`push`](Self::push),
+    /// which panics.
+    #[inline]
+    #[must_use]
+    pub fn try_push(&mut self, op: Operand) -> bool {
+        if (self.len as usize) >= Self::MAX_LEN {
+            return false;
+        }
+        self.items[self.len as usize] = op;
+        self.len += 1;
+        true
+    }
+
     /// Appends an operand to the list.
     ///
     /// # Panics
-    /// Panics if the list is full (> 4 operands).
+    ///
+    /// Panics if the list is already full. Only for callers that construct
+    /// instructions programmatically and control the operand count; anything
+    /// driven by parsed input must use [`try_push`](Self::try_push).
     #[inline]
     pub fn push(&mut self, op: Operand) {
         assert!(
@@ -3460,6 +3874,43 @@ impl OperandList {
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [Operand] {
         &mut self.items[..self.len as usize]
+    }
+}
+
+impl core::ops::Index<usize> for OperandList {
+    type Output = Operand;
+
+    /// Indexing past the operands the instruction actually has yields
+    /// [`Operand::Missing`] rather than panicking.
+    ///
+    /// Encoders index operands positionally after checking the count, but
+    /// there are hundreds of such arms and the counts come from parsed text;
+    /// one missing check would otherwise be a panic reachable from untrusted
+    /// input. `Missing` is rejected by every extraction helper, so a forgotten
+    /// check surfaces as an ordinary "invalid operands" diagnostic.
+    #[inline]
+    fn index(&self, idx: usize) -> &Operand {
+        match self.items.get(idx) {
+            Some(op) => op,
+            // Past the fixed capacity entirely — still not a panic.
+            None => &Operand::Missing,
+        }
+    }
+}
+
+impl core::ops::IndexMut<usize> for OperandList {
+    /// Unlike the shared [`Index`](core::ops::Index) impl, this panics out of
+    /// range: writes come from this crate's own transforms, which know how
+    /// many operands they are working with, so an out-of-range write is a bug
+    /// worth surfacing rather than input worth diagnosing.
+    #[inline]
+    fn index_mut(&mut self, idx: usize) -> &mut Operand {
+        assert!(
+            idx < self.len as usize,
+            "OperandList index {idx} out of range (len {})",
+            self.len
+        );
+        &mut self.items[idx]
     }
 }
 
@@ -3721,11 +4172,10 @@ impl<'de> serde::Deserialize<'de> for PrefixList {
 // ─── Default for Operand (used by OperandList) ──────────────────────
 
 impl Default for Operand {
-    /// Returns a sentinel default value (`Immediate(0)`).
-    /// Only used for unoccupied slots in [`OperandList`]; never exposed.
+    /// The sentinel for an absent operand.
     #[inline]
     fn default() -> Self {
-        Operand::Immediate(0)
+        Operand::Missing
     }
 }
 

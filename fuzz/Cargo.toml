@@ -10,6 +10,13 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
+# Reference decoders for the differential target. Asserting "does not panic"
+# cannot catch machine code that is well-formed but means the wrong thing, so
+# the differential target checks our output against independent decoders.
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel"] }
+bad64 = "0.12"
+riscv-decode = "0.2"
+
 [dependencies.asm-rs]
 path = "../crates/asm-rs"
 features = ["std", "x86", "x86_64", "arm", "aarch64", "riscv", "riscv_f"]
@@ -20,6 +27,11 @@ members = ["."]
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "fuzz_differential"
+path = "fuzz_targets/fuzz_differential.rs"
+doc = false
 
 [[bin]]
 name = "fuzz_x86_64"

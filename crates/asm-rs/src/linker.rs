@@ -21,14 +21,15 @@ use crate::error::{AsmError, Span};
 
 /// Compact byte storage for fragment payloads.
 ///
-/// Instructions (≤15 bytes) are stored inline as [`InstrBytes`] — zero heap
-/// allocations on the hot encoding path.  Data directives that may exceed
-/// 15 bytes fall back to a heap-allocated `Vec<u8>`.
+/// Instructions are stored inline as [`InstrBytes`], whose 32-byte capacity
+/// covers every encodable instruction on every supported target — zero heap
+/// allocations on the hot encoding path.  Data directives, which have no such
+/// bound, fall back to a heap-allocated `Vec<u8>`.
 #[derive(Debug, Clone)]
 pub enum FragmentBytes {
-    /// Inline storage (≤15 bytes) — no heap allocation.
+    /// Inline storage — no heap allocation.
     Inline(InstrBytes),
-    /// Heap-allocated storage for data larger than 15 bytes.
+    /// Heap-allocated storage for data of unbounded size.
     Heap(Vec<u8>),
 }
 
@@ -111,6 +112,55 @@ fn read_le16(bytes: &[u8], offset: usize, label: &str, span: Span) -> Result<u16
         }
     };
     Ok(u16::from_le_bytes(arr))
+}
+
+/// Check that a PC-relative displacement is representable at the granularity
+/// its encoding scales by, and return it shifted.
+///
+/// Branch encodings store their displacement pre-scaled — AArch64 and ARM by
+/// 4, Thumb and RISC-V by 2 — so the low bits of a misaligned target simply
+/// have nowhere to go. Shifting them off produces a perfectly well-formed
+/// instruction that branches to the wrong address, which is exactly the kind
+/// of failure a decoder will not flag. GNU `as` diagnoses it, and so does this.
+#[cfg(any(feature = "arm", feature = "aarch64", feature = "riscv"))]
+fn scaled_displacement(rel: i64, alignment: u8, label: &str, span: Span) -> Result<i64, AsmError> {
+    let mask = i64::from(alignment - 1);
+    if rel & mask != 0 {
+        return Err(AsmError::MisalignedBranchTarget {
+            label: String::from(label),
+            disp: rel,
+            alignment,
+            span,
+        });
+    }
+    Ok(rel >> alignment.trailing_zeros())
+}
+
+/// Split a halfword-scaled branch offset into the `S`, `J1`, `J2`, `imm10`,
+/// `imm11` fields shared by the Thumb-2 `BL` (encoding T1) and `B.W`
+/// (encoding T4) instructions.
+///
+/// Per the Arm ARM, both encodings reconstruct the offset as
+/// `SignExtend(S:I1:I2:imm10:imm11:'0')` with
+/// `I1 = NOT(J1 EOR S)` and `I2 = NOT(J2 EOR S)`.
+/// Inverting that gives `J1 = NOT(I1 EOR S)` and `J2 = NOT(I2 EOR S)`,
+/// where — for a 24-bit signed `offset` — `S` is bit 23, `I1` is bit 22 and
+/// `I2` is bit 21.
+///
+/// Getting the `I1`/`I2` bit positions wrong only shows up for targets more
+/// than ±4 MiB away (closer targets have `I1 == I2 == S` by sign extension),
+/// so this is covered by a dedicated far-branch test.
+#[cfg(feature = "arm")]
+fn thumb_t1_t4_fields(offset: i64) -> (u16, u16, u16, u16, u16) {
+    let imm = offset as u32;
+    let s = ((imm >> 23) & 1) as u16;
+    let i1 = (imm >> 22) & 1;
+    let i2 = (imm >> 21) & 1;
+    let j1 = (!(i1 ^ u32::from(s)) & 1) as u16;
+    let j2 = (!(i2 ^ u32::from(s)) & 1) as u16;
+    let imm10 = ((imm >> 11) & 0x3FF) as u16;
+    let imm11 = (imm & 0x7FF) as u16;
+    (s, j1, j2, imm10, imm11)
 }
 
 /// ARM modified-immediate encoder for the linker: find (imm8, rot) such that
@@ -251,6 +301,15 @@ pub struct Linker {
     numeric: NumericLabels,
     constants: BTreeMap<String, i128>,
     base_address: u64,
+    /// Set once `resolve()` has patched relocations into the fragments.
+    resolved: bool,
+    /// Hard ceiling on the laid-out image size.
+    ///
+    /// `.org` and `.align` can request an arbitrary amount of padding that is
+    /// not proportional to the source text, so the ceiling is enforced during
+    /// *layout* — before any buffer is reserved — rather than after the bytes
+    /// have already been materialised.
+    max_output_bytes: usize,
 }
 
 impl Default for Linker {
@@ -269,7 +328,18 @@ impl Linker {
             numeric: NumericLabels::default(),
             constants: BTreeMap::new(),
             base_address: 0,
+            resolved: false,
+            max_output_bytes: usize::MAX,
         }
+    }
+
+    /// Set the hard ceiling on the laid-out image size, in bytes.
+    ///
+    /// Exceeding it during layout aborts with
+    /// [`AsmError::ResourceLimitExceeded`] before any output buffer is
+    /// reserved.
+    pub fn set_max_output_bytes(&mut self, max: usize) {
+        self.max_output_bytes = max;
     }
 
     /// Set the base (origin) address for the assembled output.
@@ -408,11 +478,25 @@ impl Linker {
     ///
     /// # Note
     ///
-    /// This method **consumes** the linker's internal fragment list. After calling
-    /// `resolve()`, the `Linker` is left in an empty state — calling `resolve()`
-    /// again will produce an empty output. If you need to re-link, create a new
-    /// `Linker` instance and re-add all fragments.
+    /// Relocations are patched into the fragments **in place**, so `resolve()`
+    /// is single-shot: calling it a second time would apply every relocation
+    /// on top of the already-patched bytes and produce garbage. To re-link,
+    /// build a fresh `Linker` and re-add the fragments.
     pub fn resolve(&mut self) -> Result<ResolveOutput, AsmError> {
+        // Guard the in-place patching: a second pass would apply every
+        // relocation on top of already-patched bytes and silently emit
+        // garbage, so refuse rather than corrupt.
+        if self.resolved {
+            return Err(AsmError::Syntax {
+                msg: String::from(
+                    "linker already resolved: relocations are patched in place, \
+                     so build a fresh Linker to re-link",
+                ),
+                span: Span::new(0, 0, 0, 0),
+            });
+        }
+        self.resolved = true;
+
         // Phase 1: branch relaxation (Szymanski monotonic growth)
         let offsets = self.relax()?;
 
@@ -430,6 +514,7 @@ impl Linker {
 
         for _iter in 0..MAX_RELAXATION_ITERS {
             self.compute_offsets_into(&mut offsets);
+            self.check_layout_size(&offsets)?;
             to_expand.clear();
 
             for (i, frag) in self.fragments.iter().enumerate() {
@@ -442,10 +527,19 @@ impl Linker {
                 } = frag
                 {
                     if !is_long {
-                        let frag_end = offsets[i] + short_bytes.len() as u64;
+                        let frag_end = offsets[i].wrapping_add(short_bytes.len() as u64);
                         match self.resolve_label_with_offsets(&long_relocation.label, i, &offsets) {
                             Ok(target) => {
-                                let disp = target as i64 - frag_end as i64 + long_relocation.addend;
+                                // Label addresses are caller-supplied and may
+                                // sit anywhere in the 64-bit space, so this
+                                // difference can exceed `i64`. Wrapping keeps
+                                // the range check total; a displacement that
+                                // wraps is out of range for every encoding and
+                                // is rejected below, then diagnosed properly
+                                // when the relocation is applied.
+                                let disp = (target as i64)
+                                    .wrapping_sub(frag_end as i64)
+                                    .wrapping_add(long_relocation.addend);
                                 let in_range = if let Some(ref sr) = short_relocation {
                                     // Architecture-specific short form range check
                                     match sr.kind {
@@ -537,6 +631,23 @@ impl Linker {
         })
     }
 
+    /// Reject a layout whose end address exceeds the configured ceiling.
+    ///
+    /// Called after every offset computation so that a `.org`/`.align`
+    /// requesting terabytes of padding fails fast instead of being handed to
+    /// the allocator.
+    fn check_layout_size(&self, offsets: &[u64]) -> Result<(), AsmError> {
+        let end = offsets.last().copied().unwrap_or(self.base_address);
+        let size = end.saturating_sub(self.base_address);
+        if size > self.max_output_bytes as u64 {
+            return Err(AsmError::ResourceLimitExceeded {
+                resource: String::from("output bytes"),
+                limit: self.max_output_bytes,
+            });
+        }
+        Ok(())
+    }
+
     // ── offset computation ─────────────────────────────────
 
     /// Build an offset table: `offsets[i]` is the absolute address of fragment `i`.
@@ -592,7 +703,15 @@ impl Linker {
     // ── final emit ─────────────────────────────────────────
 
     fn emit_final(&mut self, offsets: Vec<u64>) -> Result<ResolveOutput, AsmError> {
-        let total_size = offsets.last().copied().unwrap_or(self.base_address) - self.base_address;
+        // Re-checked here (and not only in `relax`) so that `emit_final` is
+        // safe to reach from any future caller: the reservation below is sized
+        // directly from the layout.
+        self.check_layout_size(&offsets)?;
+        let total_size = offsets
+            .last()
+            .copied()
+            .unwrap_or(self.base_address)
+            .saturating_sub(self.base_address);
         let mut output = Vec::with_capacity(total_size as usize);
         let mut applied_relocs = Vec::new();
 
@@ -695,8 +814,10 @@ impl Linker {
                         let frag_output_offset = output.len();
                         let target =
                             self.resolve_label_with_offsets(&long_relocation.label, i, &offsets)?;
-                        let frag_end = offsets[i] + short_bytes.len() as u64;
-                        let disp = target as i64 - frag_end as i64 + long_relocation.addend;
+                        let frag_end = offsets[i].wrapping_add(short_bytes.len() as u64);
+                        let disp = (target as i64)
+                            .wrapping_sub(frag_end as i64)
+                            .wrapping_add(long_relocation.addend);
                         if !(-128..=127).contains(&disp) {
                             return Err(AsmError::BranchOutOfRange {
                                 label: long_relocation.label.to_string(),
@@ -866,7 +987,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(pc as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 2;
+                let offset = scaled_displacement(rel, 4, &reloc.label, span)?;
                 if !(-(1 << 23)..(1 << 23)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -947,7 +1068,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(pc as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 1;
+                let offset = scaled_displacement(rel, 2, &reloc.label, span)?;
                 if !(-(1i64 << 7)..(1i64 << 7)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -968,7 +1089,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(pc as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 1;
+                let offset = scaled_displacement(rel, 2, &reloc.label, span)?;
                 if !(-(1i64 << 10)..(1i64 << 10)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -989,7 +1110,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(pc as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 1;
+                let offset = scaled_displacement(rel, 2, &reloc.label, span)?;
                 if !(-(1i64 << 23)..(1i64 << 23)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -998,12 +1119,7 @@ impl Linker {
                         span,
                     });
                 }
-                let s = if offset < 0 { 1_u16 } else { 0 };
-                let imm = offset as u32;
-                let imm10 = ((imm >> 11) & 0x3FF) as u16;
-                let imm11 = (imm & 0x7FF) as u16;
-                let j1 = (!((imm >> 23) ^ (s as u32)) & 1) as u16;
-                let j2 = (!((imm >> 22) ^ (s as u32)) & 1) as u16;
+                let (s, j1, j2, imm10, imm11) = thumb_t1_t4_fields(offset);
                 let hw1 = 0xF000 | (s << 10) | imm10;
                 let hw2 = 0xD000 | (j1 << 13) | (j2 << 11) | imm11;
                 bytes[reloc.offset..reloc.offset + 2].copy_from_slice(&hw1.to_le_bytes());
@@ -1016,7 +1132,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(pc as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 1;
+                let offset = scaled_displacement(rel, 2, &reloc.label, span)?;
                 if !(-(1i64 << 23)..(1i64 << 23)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -1025,12 +1141,7 @@ impl Linker {
                         span,
                     });
                 }
-                let s = if offset < 0 { 1_u16 } else { 0 };
-                let imm = offset as u32;
-                let imm10 = ((imm >> 11) & 0x3FF) as u16;
-                let imm11 = (imm & 0x7FF) as u16;
-                let j1 = (!((imm >> 23) ^ (s as u32)) & 1) as u16;
-                let j2 = (!((imm >> 22) ^ (s as u32)) & 1) as u16;
+                let (s, j1, j2, imm10, imm11) = thumb_t1_t4_fields(offset);
                 let hw1 = 0xF000 | (s << 10) | imm10;
                 let hw2 = 0x9000 | (j1 << 13) | (j2 << 11) | imm11;
                 bytes[reloc.offset..reloc.offset + 2].copy_from_slice(&hw1.to_le_bytes());
@@ -1043,7 +1154,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(pc as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 1;
+                let offset = scaled_displacement(rel, 2, &reloc.label, span)?;
                 if !(-(1i64 << 19)..(1i64 << 19)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -1093,7 +1204,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(reloc_abs as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 2;
+                let offset = scaled_displacement(rel, 4, &reloc.label, span)?;
                 if !(-(1 << 25)..(1 << 25)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -1113,7 +1224,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(reloc_abs as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 2;
+                let offset = scaled_displacement(rel, 4, &reloc.label, span)?;
                 if !(-(1 << 18)..(1 << 18)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -1133,7 +1244,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(reloc_abs as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 2;
+                let offset = scaled_displacement(rel, 4, &reloc.label, span)?;
                 if !(-(1 << 13)..(1 << 13)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -1153,7 +1264,7 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(reloc_abs as i64)
                     .wrapping_add(reloc.addend);
-                let offset = rel >> 2;
+                let offset = scaled_displacement(rel, 4, &reloc.label, span)?;
                 if !(-(1 << 18)..(1 << 18)).contains(&offset) {
                     return Err(AsmError::BranchOutOfRange {
                         label: reloc.label.to_string(),
@@ -1253,8 +1364,10 @@ impl Linker {
                         span,
                     });
                 }
+                // Bit 0 of the displacement is implicit in the encoding.
+                scaled_displacement(rel, 2, &reloc.label, span)?;
                 let imm = rel as u32;
-                let packed = (imm & 0x0010_0000)          // imm[20]   → bit 31
+                let packed = ((imm & 0x0010_0000) << 11)  // imm[20]   → bit 31
                     | ((imm & 0x7FE) << 20)               // imm[10:1] → bits 30:21
                     | ((imm & 0x800) << 9)                // imm[11]   → bit 20
                     | (imm & 0x000F_F000); // imm[19:12]→ bits 19:12
@@ -1277,6 +1390,7 @@ impl Linker {
                         span,
                     });
                 }
+                scaled_displacement(rel, 2, &reloc.label, span)?;
                 let imm = rel as u32;
                 let packed_hi = ((imm & 0x1000) << 19)    // imm[12]   → bit 31
                     | ((imm & 0x7E0) << 20); // imm[10:5] → bits 30:25
@@ -1295,6 +1409,19 @@ impl Linker {
                 let rel = (target_addr as i64)
                     .wrapping_sub(reloc_abs as i64)
                     .wrapping_add(reloc.addend);
+                // AUIPC contributes a sign-extended 32-bit value, and the JALR
+                // immediate is sign-extended from 12 bits, so the reachable
+                // window is [-2^31 - 2^11, 2^31 - 2^11).  Without this check a
+                // far target silently truncates to a wrong (and jumpable)
+                // address instead of producing a diagnostic.
+                if !(-(1i64 << 31) - 0x800..(1i64 << 31) - 0x800).contains(&rel) {
+                    return Err(AsmError::BranchOutOfRange {
+                        label: reloc.label.to_string(),
+                        disp: rel,
+                        max: (1i64 << 31) - 0x800 - 1,
+                        span,
+                    });
+                }
                 let hi20 = ((rel + 0x800) >> 12) as u32;
                 let lo12 = (rel as u32).wrapping_sub(hi20 << 12);
                 // Patch AUIPC: upper 20 bits in bits 31:12
@@ -1322,6 +1449,7 @@ impl Linker {
                         span,
                     });
                 }
+                scaled_displacement(rel, 2, &reloc.label, span)?;
                 let imm = rel as u16;
                 // Reconstruct the CB-type halfword with the new offset
                 let mut hw = read_le16(bytes, reloc.offset, &reloc.label, span)?;
@@ -1350,6 +1478,7 @@ impl Linker {
                         span,
                     });
                 }
+                scaled_displacement(rel, 2, &reloc.label, span)?;
                 let imm = rel as u16;
                 let mut hw = read_le16(bytes, reloc.offset, &reloc.label, span)?;
                 // Clear immediate fields: bits 12:2

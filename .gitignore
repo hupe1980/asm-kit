@@ -22,10 +22,7 @@ target
 
 # Custom
 _prompts/
-BACKLOG.md
-CONCEPT.md
 FINDINGS.md
-SECUIRT
 .DS_Store
 
 # Fuzz — keep source files, ignore generated data & build artifacts

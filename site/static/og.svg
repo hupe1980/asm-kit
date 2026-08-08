@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="asm-rs — pure Rust multi-architecture assembly engine">
+  <defs>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff8a5c" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#ff8a5c" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0f1216"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1200" height="6" fill="#ff8a5c"/>
+
+  <text x="80" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="30" fill="#9aa5b1" letter-spacing="4">PURE RUST · NO UNSAFE · NO_STD</text>
+
+  <text x="80" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="104" font-weight="700" fill="#e6e9ec">asm<tspan fill="#ff8a5c">-rs</tspan></text>
+
+  <text x="80" y="342" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+        font-size="40" fill="#e6e9ec">Multi-architecture assembly engine</text>
+
+  <text x="80" y="404" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+        font-size="29" fill="#9aa5b1">Assembly text in, machine code bytes out — at runtime or compile time.</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="25" fill="#e6e9ec">
+    <rect x="80"  y="466" width="150" height="56" rx="10" fill="#161b21" stroke="#262d35"/>
+    <text x="155" y="503" text-anchor="middle">x86-64</text>
+    <rect x="248" y="466" width="118" height="56" rx="10" fill="#161b21" stroke="#262d35"/>
+    <text x="307" y="503" text-anchor="middle">x86</text>
+    <rect x="384" y="466" width="168" height="56" rx="10" fill="#161b21" stroke="#262d35"/>
+    <text x="468" y="503" text-anchor="middle">AArch64</text>
+    <rect x="570" y="466" width="150" height="56" rx="10" fill="#161b21" stroke="#262d35"/>
+    <text x="645" y="503" text-anchor="middle">ARM32</text>
+    <rect x="738" y="466" width="150" height="56" rx="10" fill="#161b21" stroke="#262d35"/>
+    <text x="813" y="503" text-anchor="middle">Thumb</text>
+    <rect x="906" y="466" width="168" height="56" rx="10" fill="#161b21" stroke="#262d35"/>
+    <text x="990" y="503" text-anchor="middle">RISC-V</text>
+  </g>
+
+  <text x="80" y="583" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="26" fill="#9aa5b1">crates.io/crates/asm-rs</text>
+</svg>

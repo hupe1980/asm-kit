@@ -19,6 +19,14 @@
 //! - **Runtime text parsing** — assemble from strings at runtime.
 //! - **`no_std` + `alloc`** — embeddable in firmware, kernels, WASM.
 //! - **Labels & branch relaxation** — automatic forward/backward label resolution.
+//!
+//! ## Where to look next
+//!
+//! - The [guide and ISA reference](https://hupe1980.github.io/asm-rs/) cover
+//!   syntax dialects, directives, resource limits and per-architecture
+//!   instruction tables.
+//! - [`Assembler`] is the builder API for labels, base addresses, listings and
+//!   resource limits; [`assemble`] is the one-shot shortcut.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -96,8 +104,8 @@ pub use error::{ArchName, AsmError, Span};
 pub use ir::{
     AddrMode, AlignDirective, Arch, BroadcastMode, ConstDef, DataDecl, DataSize, DataValue, Expr,
     FillDirective, Instruction, MemoryOperand, Mnemonic, Operand, OperandList, OperandSize,
-    OptLevel, OrgDirective, Prefix, PrefixList, Register, SpaceDirective, Statement, SvePredQual,
-    Syntax, VectorArrangement, X86Mode,
+    OptLevel, OrgDirective, Prefix, PrefixList, Register, ShiftAmount, ShiftOp, SpaceDirective,
+    Statement, SvePredQual, Syntax, VectorArrangement, X86Mode,
 };
 pub use linker::AppliedRelocation;
 pub use preprocessor::Preprocessor;

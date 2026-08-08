@@ -61,7 +61,10 @@ impl InstrBytes {
     ///
     /// # Panics
     ///
-    /// Panics if the buffer is already full (15 bytes).
+    /// Panics if the buffer is already full (32 bytes). The capacity is an
+    /// internal invariant — the longest encodable instruction on any supported
+    /// target is 15 bytes (x86-64's architectural maximum) — so overflow means
+    /// a bug in an encoder, not bad input.
     #[inline]
     pub fn push(&mut self, byte: u8) {
         assert!(
@@ -76,7 +79,8 @@ impl InstrBytes {
     ///
     /// # Panics
     ///
-    /// Panics if appending would exceed the 15-byte capacity.
+    /// Panics if appending would exceed the 32-byte capacity; see
+    /// [`push`](Self::push) for why that is an internal invariant.
     #[inline]
     pub fn extend_from_slice(&mut self, bytes: &[u8]) {
         let start = self.len as usize;
@@ -407,7 +411,7 @@ pub fn encode_instruction(instr: &Instruction, arch: Arch) -> Result<EncodedInst
 /// segment overrides into `buf`.  Returns the byte length of all emitted
 /// prefix bytes (needed later for displacement scanning).
 #[cfg(any(feature = "x86", feature = "x86_64"))]
-fn emit_x86_prefixes(buf: &mut InstrBytes, instr: &Instruction, ops: &[Operand]) -> usize {
+fn emit_x86_prefixes(buf: &mut InstrBytes, instr: &Instruction, ops: &OperandList) -> usize {
     for pfx in &instr.prefixes {
         match pfx {
             Prefix::Lock => buf.push(0xF0),
@@ -456,7 +460,7 @@ fn emit_x86_prefixes(buf: &mut InstrBytes, instr: &Instruction, ops: &[Operand])
 /// This is emitted only in `encode_x86_64`, not in `encode_x86_32` where
 /// 32-bit addressing is already the default.
 #[cfg(feature = "x86_64")]
-fn needs_addr_size_override(ops: &[Operand]) -> bool {
+fn needs_addr_size_override(ops: &OperandList) -> bool {
     for op in ops {
         if let Operand::Memory(mem) = op {
             if let Some(base) = mem.base {
@@ -480,7 +484,7 @@ fn needs_addr_size_override(ops: &[Operand]) -> bool {
 
 /// Validate that a LOCK prefix is only used with a memory destination operand.
 #[cfg(any(feature = "x86", feature = "x86_64"))]
-fn validate_lock_prefix(instr: &Instruction, ops: &[Operand]) -> Result<(), AsmError> {
+fn validate_lock_prefix(instr: &Instruction, ops: &OperandList) -> Result<(), AsmError> {
     if instr.prefixes.contains(&Prefix::Lock) {
         let has_memory_dst = matches!(ops.first(), Some(Operand::Memory(_)));
         if !has_memory_dst {
@@ -500,7 +504,7 @@ fn validate_lock_prefix(instr: &Instruction, ops: &[Operand]) -> Result<(), AsmE
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 fn propagate_disp_label_reloc(
     buf: &[u8],
-    ops: &[Operand],
+    ops: &OperandList,
     prefix_len: usize,
     reloc: &mut Option<Relocation>,
 ) {
@@ -851,21 +855,19 @@ fn encode_x86_32(instr: &Instruction) -> Result<EncodedInstr, AsmError> {
             // REX prefixes in 64-bit mode, so this path is x86-32 only.
             // For 8-bit regs and memory operands, fall through to the
             // generic encoder which uses the 0xFE/0xFF ModR/M form.
-            if ops.len() == 1 {
-                if let Operand::Register(reg) = &ops[0] {
-                    let size = reg_size(*reg);
-                    if size == 16 || size == 32 {
-                        if size == 16 {
-                            buf.push(0x66);
-                        }
-                        let base = if mnemonic == "inc" { 0x40 } else { 0x48 };
-                        buf.push(base + reg.base_code());
-                        return Ok(EncodedInstr {
-                            bytes: buf,
-                            relocation: reloc,
-                            relax: relax_info,
-                        });
+            if let [Operand::Register(reg)] = ops.as_slice() {
+                let size = reg_size(*reg);
+                if size == 16 || size == 32 {
+                    if size == 16 {
+                        buf.push(0x66);
                     }
+                    let base = if mnemonic == "inc" { 0x40 } else { 0x48 };
+                    buf.push(base + reg.base_code());
+                    return Ok(EncodedInstr {
+                        bytes: buf,
+                        relocation: reloc,
+                        relax: relax_info,
+                    });
                 }
             }
             // 8-bit / memory forms — fall through to generic dispatch
@@ -935,7 +937,7 @@ pub fn encode_instruction_16(instr: &Instruction) -> Result<EncodedInstr, AsmErr
 #[cfg(feature = "x86")]
 fn toggle_operand_size_prefix_16(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     reloc: &mut Option<Relocation>,
 ) {
     // Scan for a 0x66 byte in the prefix region (before the first non-prefix byte).
@@ -1009,7 +1011,7 @@ fn is_legacy_prefix(b: u8) -> bool {
 #[cfg(feature = "x86")]
 fn encode_push_32(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -1109,7 +1111,7 @@ fn encode_push_32(
 #[cfg(feature = "x86")]
 fn encode_pop_32(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 1 {
@@ -1454,7 +1456,7 @@ pub(crate) fn emit_rex_for_digit_mem(buf: &mut InstrBytes, size: u8, mem: &Memor
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_nop(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.is_empty() {
@@ -1489,7 +1491,7 @@ pub(crate) fn encode_multibyte_nop(buf: &mut InstrBytes, mnemonic: &str) -> Resu
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_int(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 1 {
@@ -1519,7 +1521,7 @@ pub(crate) fn encode_int(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_ret(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.is_empty() {
@@ -1551,7 +1553,7 @@ pub(crate) fn encode_ret(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_retf(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.is_empty() {
@@ -1583,7 +1585,7 @@ pub(crate) fn encode_retf(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_mov(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -1788,7 +1790,7 @@ pub(crate) fn encode_mov_reg_imm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_lea(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -1823,7 +1825,7 @@ pub(crate) fn encode_lea(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_push(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -1917,7 +1919,7 @@ pub(crate) fn encode_push(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_pop(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 1 {
@@ -1979,7 +1981,7 @@ pub(crate) fn encode_pop(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_alu(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     alu_num: u8,
     reloc: &mut Option<Relocation>,
@@ -2155,7 +2157,7 @@ pub(crate) fn encode_alu_mem_imm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_test(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -2250,7 +2252,7 @@ pub(crate) fn encode_test(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_unary(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -2300,7 +2302,7 @@ pub(crate) fn encode_unary(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_imul(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match ops.len() {
@@ -2432,7 +2434,7 @@ pub(crate) fn encode_imul(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_inc_dec(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -2482,7 +2484,7 @@ pub(crate) fn encode_inc_dec(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_shift(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -2606,7 +2608,7 @@ pub(crate) fn encode_shift(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_jmp(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     relax: &mut Option<RelaxInfo>,
@@ -2666,7 +2668,7 @@ pub(crate) fn encode_jmp(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_call(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
 ) -> Result<(), AsmError> {
@@ -2712,7 +2714,7 @@ pub(crate) fn encode_call(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_jcc(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     cc: u8,
     reloc: &mut Option<Relocation>,
@@ -2774,7 +2776,7 @@ pub(crate) fn encode_jcc(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_loop(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     opcode: u8,
     reloc: &mut Option<Relocation>,
@@ -2844,7 +2846,7 @@ pub(crate) fn encode_loop(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_setcc(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     cc: u8,
 ) -> Result<(), AsmError> {
@@ -2893,7 +2895,7 @@ pub(crate) fn encode_setcc(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_cmovcc(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     cc: u8,
 ) -> Result<(), AsmError> {
@@ -2954,7 +2956,7 @@ pub(crate) fn encode_cmovcc(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_movzx(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -2995,7 +2997,7 @@ pub(crate) fn encode_movzx(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_movsx(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -3057,7 +3059,7 @@ pub(crate) fn encode_movsx(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_xchg(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 2 {
@@ -3135,7 +3137,7 @@ pub(crate) fn encode_xchg(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_bt(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -3251,7 +3253,7 @@ pub(crate) fn encode_bt(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_bsf_bsr(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     opcode2: u8,
 ) -> Result<(), AsmError> {
@@ -3310,7 +3312,7 @@ pub(crate) fn encode_bsf_bsr(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 fn encode_f3_0f_rm(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     mnemonic: &str,
     opcode: u8,
     span: Span,
@@ -3359,7 +3361,7 @@ fn encode_f3_0f_rm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_popcnt(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     encode_f3_0f_rm(buf, ops, "popcnt", 0xB8, instr.span)
@@ -3368,7 +3370,7 @@ pub(crate) fn encode_popcnt(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_lzcnt(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     encode_f3_0f_rm(buf, ops, "lzcnt", 0xBD, instr.span)
@@ -3377,7 +3379,7 @@ pub(crate) fn encode_lzcnt(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_tzcnt(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     encode_f3_0f_rm(buf, ops, "tzcnt", 0xBC, instr.span)
@@ -3386,7 +3388,7 @@ pub(crate) fn encode_tzcnt(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_bswap(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     if ops.len() != 1 {
@@ -3422,19 +3424,24 @@ pub(crate) fn encode_bswap(
     Ok(())
 }
 
-/// Emit an immediate value of the given size.
+/// Emit an immediate value of the given size, in bits.
 ///
-/// # Panics
-///
-/// Panics if `size` is not one of 8, 16, 32, or 64.
+/// `size` comes from this crate's own encoding tables, so anything other than
+/// 8/16/32/64 is an internal bug. It is handled by rounding up to the next
+/// supported width rather than panicking: the assembler processes untrusted
+/// input, and a panic in a `no_std` embedding aborts rather than unwinding.
+/// Debug builds still trip an assertion so the bug surfaces in testing.
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn emit_imm(buf: &mut InstrBytes, imm: i128, size: u8) {
+    debug_assert!(
+        matches!(size, 8 | 16 | 32 | 64),
+        "emit_imm: unsupported immediate size {size} (expected 8, 16, 32, or 64)"
+    );
     match size {
-        8 => buf.push(imm as u8),
-        16 => buf.extend_from_slice(&(imm as u16).to_le_bytes()),
-        32 => buf.extend_from_slice(&(imm as u32).to_le_bytes()),
-        64 => buf.extend_from_slice(&(imm as u64).to_le_bytes()),
-        other => panic!("emit_imm: unsupported immediate size {other} (expected 8, 16, 32, or 64)"),
+        0..=8 => buf.push(imm as u8),
+        9..=16 => buf.extend_from_slice(&(imm as u16).to_le_bytes()),
+        17..=32 => buf.extend_from_slice(&(imm as u32).to_le_bytes()),
+        _ => buf.extend_from_slice(&(imm as u64).to_le_bytes()),
     }
 }
 
@@ -3539,7 +3546,7 @@ pub(crate) fn encode_sse_mr(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_sse_op(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     mandatory_prefix: u8,
     load_opcode: &[u8],
@@ -3577,7 +3584,7 @@ pub(crate) fn encode_sse_op(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_sse_imm(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     mandatory_prefix: u8,
     opcode: &[u8],
@@ -3618,7 +3625,7 @@ pub(crate) fn encode_sse_imm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_movd_movq(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     reloc: &mut Option<Relocation>,
     is_movq: bool,
@@ -3670,7 +3677,7 @@ pub(crate) fn encode_movd_movq(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_cvtsi2(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     mandatory_prefix: u8,
     reloc: &mut Option<Relocation>,
@@ -3700,7 +3707,7 @@ pub(crate) fn encode_cvtsi2(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_cvt2si(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     mandatory_prefix: u8,
     opcode2: u8,
@@ -3731,7 +3738,7 @@ pub(crate) fn encode_cvt2si(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_prefetch(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     digit: u8,
 ) -> Result<(), AsmError> {
@@ -3759,7 +3766,7 @@ pub(crate) fn encode_prefetch(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_clflush(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match ops.first() {
@@ -3785,7 +3792,7 @@ pub(crate) fn encode_clflush(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_clflushopt(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match ops.first() {
@@ -3812,7 +3819,7 @@ pub(crate) fn encode_clflushopt(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_clwb(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match ops.first() {
@@ -3839,7 +3846,7 @@ pub(crate) fn encode_clwb(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_prefetchw(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match ops.first() {
@@ -3865,7 +3872,7 @@ pub(crate) fn encode_prefetchw(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_crc32(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
 ) -> Result<(), AsmError> {
     match (ops.first(), ops.get(1)) {
@@ -4116,7 +4123,7 @@ pub(crate) fn encode_vex_rrm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_op(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4220,7 +4227,7 @@ pub(crate) fn encode_vex_op(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_imm(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4305,7 +4312,7 @@ pub(crate) fn encode_vex_imm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_bmi_vex_ndd(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4423,7 +4430,7 @@ pub(crate) fn encode_vex_bmi_vex_ndd(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_bmi_digit(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4491,7 +4498,7 @@ pub(crate) fn encode_vex_bmi_digit(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_bmi_imm(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4562,7 +4569,7 @@ pub(crate) fn encode_vex_bmi_imm(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_bmi_rmv(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4640,7 +4647,7 @@ pub(crate) fn encode_vex_bmi_rmv(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_shift(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4709,7 +4716,7 @@ pub(crate) fn encode_vex_shift(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_vex_cvt(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     escape: &[u8],
@@ -4983,7 +4990,7 @@ fn evex_broadcast_bit(instr: &Instruction) -> bool {
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_evex_op(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     mm: u8,
@@ -5148,7 +5155,7 @@ pub(crate) fn encode_evex_op(
 #[cfg(any(feature = "x86", feature = "x86_64"))]
 pub(crate) fn encode_evex_imm(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     mm: u8,
@@ -5254,7 +5261,7 @@ pub(crate) fn encode_evex_imm(
 #[allow(dead_code)]
 pub(crate) fn encode_evex_opmask(
     buf: &mut InstrBytes,
-    ops: &[Operand],
+    ops: &OperandList,
     instr: &Instruction,
     pp: u8,
     _mm: u8,

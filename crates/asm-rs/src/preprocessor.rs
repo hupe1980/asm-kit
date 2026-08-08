@@ -10,16 +10,25 @@
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{AsmError, Span};
 
 /// Default maximum macro expansion recursion depth.
-const DEFAULT_MAX_RECURSION_DEPTH: usize = 256;
+///
+/// Every level of `.rept`/macro nesting costs a native stack frame, so this is
+/// deliberately shallow: a limit deep enough to overflow the stack would abort
+/// the process instead of returning [`AsmError::ResourceLimitExceeded`], and an
+/// abort cannot be caught by a host embedding the assembler.
+const DEFAULT_MAX_RECURSION_DEPTH: usize = 32;
 
 /// Maximum total iterations across all `.rept`/`.irp`/`.irpc` blocks.
 const DEFAULT_MAX_ITERATION_COUNT: usize = 100_000;
+
+/// Default ceiling on total bytes of expanded text.
+const DEFAULT_MAX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Append `body` to `out`, replacing every occurrence of `placeholder` with `value`.
 /// Avoids allocating an intermediate `String` — writes directly into `out`.
@@ -41,6 +50,9 @@ fn replace_single_param(out: &mut String, body: &str, placeholder: &str, value: 
 }
 
 /// A macro definition.
+///
+/// Stored behind an [`Rc`](alloc::rc::Rc) in [`Preprocessor::macros`] so that
+/// invoking a macro clones a refcount rather than its whole body text.
 #[derive(Debug, Clone)]
 struct MacroDef {
     /// Parameter names (without leading `\`).
@@ -61,7 +73,7 @@ struct MacroParam {
 #[derive(Debug)]
 pub struct Preprocessor {
     /// Defined macros: name → definition.
-    macros: BTreeMap<String, MacroDef>,
+    macros: BTreeMap<String, Rc<MacroDef>>,
     /// Defined symbols for `.ifdef`/`.ifndef` (name → value).
     symbols: BTreeMap<String, i128>,
     /// Counter for `\@` unique label generation.
@@ -74,6 +86,10 @@ pub struct Preprocessor {
     max_iteration_count: usize,
     /// Total iteration count across all loops (bounds check).
     iteration_count: usize,
+    /// Maximum total bytes of expanded text (configurable).
+    max_expanded_bytes: usize,
+    /// Bytes of expanded text produced so far in this `process()` call.
+    expanded_bytes: usize,
 }
 
 impl Preprocessor {
@@ -87,7 +103,30 @@ impl Preprocessor {
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
             max_iteration_count: DEFAULT_MAX_ITERATION_COUNT,
             iteration_count: 0,
+            max_expanded_bytes: DEFAULT_MAX_EXPANDED_BYTES,
+            expanded_bytes: 0,
         }
+    }
+
+    /// Set the maximum total size, in bytes, of expanded preprocessor output.
+    pub fn set_max_expanded_bytes(&mut self, bytes: usize) {
+        self.max_expanded_bytes = bytes;
+    }
+
+    /// Charge `n` bytes against the expansion budget.
+    ///
+    /// Iteration and recursion counters bound how *often* the preprocessor
+    /// loops, not how much text each pass emits, so expansion size is metered
+    /// separately.
+    fn charge_expansion(&mut self, n: usize) -> Result<(), AsmError> {
+        self.expanded_bytes = self.expanded_bytes.saturating_add(n);
+        if self.expanded_bytes > self.max_expanded_bytes {
+            return Err(AsmError::ResourceLimitExceeded {
+                resource: String::from("preprocessor expanded bytes"),
+                limit: self.max_expanded_bytes,
+            });
+        }
+        Ok(())
     }
 
     /// Set the maximum recursion depth for macro expansion.
@@ -119,6 +158,7 @@ impl Preprocessor {
         // Reset iteration count per process() call so long-lived assemblers
         // don't accumulate towards the limit across multiple emit() calls.
         self.iteration_count = 0;
+        self.expanded_bytes = 0;
         if !self.needs_expansion(source) {
             return Ok(Cow::Borrowed(source));
         }
@@ -141,8 +181,21 @@ impl Preprocessor {
         // non-whitespace content matches a preprocessor directive.
         // This is cheaper than the full expansion: no allocation, no
         // string building — just a linear scan of the source bytes.
+        //
+        // The scan runs over every line of every `emit()`, so it starts with
+        // the cheapest possible discriminator: every directive it looks for
+        // begins with '.', and almost no line in real assembly does. That one
+        // byte comparison skips the ~20 string comparisons below for the
+        // overwhelming majority of lines.
+        if !source.as_bytes().contains(&b'.') {
+            return false;
+        }
         for line in source.lines() {
-            let trimmed = line.trim();
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('.') {
+                continue;
+            }
+            let trimmed = trimmed.trim_end();
             if trimmed.starts_with(".macro ")
                 || trimmed.starts_with(".macro\t")
                 || trimmed.starts_with(".rept ")
@@ -202,7 +255,7 @@ impl Preprocessor {
             if trimmed.starts_with(".macro ") || trimmed.starts_with(".macro\t") {
                 let (macro_def, end_idx) = self.parse_macro_def(lines, *i)?;
                 let name = parse_macro_name(trimmed, *i)?;
-                self.macros.insert(name, macro_def);
+                self.macros.insert(name, Rc::new(macro_def));
                 *i = end_idx + 1;
                 continue;
             }
@@ -270,6 +323,10 @@ impl Preprocessor {
 
             // --- Macro invocation ---
             if let Some(expanded) = self.try_expand_macro(trimmed)? {
+                // Mutually-invoking macros grow the text exponentially with
+                // depth, so meter each expansion against the byte budget
+                // before recursing into it.
+                self.charge_expansion(expanded.len())?;
                 // Recursively expand the result
                 let re_expanded = self.expand_text(&expanded)?;
                 output.push_str(&re_expanded);
@@ -450,6 +507,7 @@ impl Preprocessor {
                     limit: self.max_iteration_count,
                 });
             }
+            self.charge_expansion(body.len() + 1)?;
             raw.push_str(body);
             raw.push('\n');
         }
@@ -469,6 +527,7 @@ impl Preprocessor {
                     limit: self.max_iteration_count,
                 });
             }
+            self.charge_expansion(body.len() + val.len() + 1)?;
             replace_single_param(&mut raw, body, &placeholder, val);
             raw.push('\n');
         }
@@ -488,6 +547,7 @@ impl Preprocessor {
                     limit: self.max_iteration_count,
                 });
             }
+            self.charge_expansion(body.len() + ch.len_utf8() + 1)?;
             let ch_str = ch.encode_utf8(&mut ch_buf);
             replace_single_param(&mut raw, body, &placeholder, ch_str);
             raw.push('\n');

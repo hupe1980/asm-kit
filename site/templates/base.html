@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default(value=config.default_language) }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{#- Title and description drive both the tab and every social card, so they are
+    resolved once here and reused rather than repeated per tag. -#}
+{%- set page_title = title | default(value="") -%}
+{%- if page_title -%}
+  {%- set_global full_title = page_title ~ " · " ~ config.title -%}
+{%- else -%}
+  {%- set_global full_title = config.title ~ " — pure Rust multi-architecture assembler" -%}
+{%- endif -%}
+{%- set desc = description | default(value=config.description) -%}
+{%- set canonical = permalink | default(value=config.base_url ~ "/") -%}
+{%- set social_image = config.base_url ~ "/" ~ config.extra.social_image -%}
+
+<title>{{ full_title }}</title>
+<meta name="description" content="{{ desc }}">
+<link rel="canonical" href="{{ canonical | safe }}">
+
+<meta property="og:type" content="{{ og_type | default(value='website') }}">
+<meta property="og:site_name" content="{{ config.title }}">
+<meta property="og:title" content="{{ full_title }}">
+<meta property="og:description" content="{{ desc }}">
+<meta property="og:url" content="{{ canonical | safe }}">
+<meta property="og:image" content="{{ social_image | safe }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ full_title }}">
+<meta name="twitter:description" content="{{ desc }}">
+<meta name="twitter:image" content="{{ social_image | safe }}">
+
+<link rel="icon" href="{{ get_url(path='icon.svg') | safe }}" type="image/svg+xml">
+<link rel="alternate" type="application/atom+xml" title="{{ config.title }}" href="{{ get_url(path='atom.xml') | safe }}">
+<link rel="stylesheet" href="{{ get_url(path='main.css') | safe }}">
+
+{#- Structured data: SoftwareSourceCode is the schema.org type search engines
+    map to a code library, and it is what earns the richer result. -#}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "asm-rs",
+  "description": {{ config.description | json_encode | safe }},
+  "url": {{ config.base_url | json_encode | safe }},
+  "codeRepository": {{ config.extra.repo | json_encode | safe }},
+  "programmingLanguage": "Rust",
+  "license": "https://spdx.org/licenses/MIT.html",
+  "author": { "@type": "Person", "name": {{ config.extra.author | json_encode | safe }} }
+}
+</script>
+{%- block head %}{% endblock head %}
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="{{ get_url(path='@/_index.md') | safe }}">
+      <img src="{{ get_url(path='icon.svg') | safe }}" alt="" width="26" height="26">
+      <span>asm-rs</span>
+    </a>
+    <nav aria-label="Main">
+      <ul class="nav">
+        {%- for item in config.extra.nav %}
+        <li><a href="{% if item.external %}{{ item.url }}{% else %}{{ get_url(path=item.url) | safe }}{% endif %}">{{ item.name }}</a></li>
+        {%- endfor %}
+        <li><a href="{{ config.extra.repo }}" rel="noopener">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+{% block content %}{% endblock content %}
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>
+      <strong>asm-rs</strong> — pure Rust multi-architecture assembly engine.
+      Dual-licensed <a href="{{ config.extra.repo }}/blob/main/LICENSE-MIT">MIT</a> or
+      <a href="{{ config.extra.repo }}/blob/main/LICENSE-APACHE">Apache-2.0</a>.
+    </p>
+    <p class="muted">
+      <a href="{{ config.extra.crate }}">crates.io</a> ·
+      <a href="{{ config.extra.api_docs }}">docs.rs</a> ·
+      <a href="{{ config.extra.repo }}">Source</a>
+    </p>
+  </div>
+</footer>
+</body>
+</html>

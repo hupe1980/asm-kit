@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{#- Shared chrome for every documentation page: a sidebar built from the docs
+    section tree, plus a table of contents for the current page. Both are
+    derived from content rather than hand-maintained, so adding a page cannot
+    leave the navigation stale. -#}
+
+{% macro sidebar(current) %}
+  {%- set docs = get_section(path="docs/_index.md") -%}
+  <nav class="sidebar" aria-label="Documentation">
+    <p class="sidebar-title">Guide</p>
+    <ul>
+      <li><a href="{{ docs.permalink | safe }}"{% if current == docs.permalink %} aria-current="page"{% endif %}>Overview</a></li>
+      {%- for p in docs.pages %}
+      <li><a href="{{ p.permalink | safe }}"{% if current == p.permalink %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+      {%- endfor %}
+    </ul>
+    {%- for sub in docs.subsections %}
+    {%- set s = get_section(path=sub) %}
+    <p class="sidebar-title">{{ s.title }}</p>
+    <ul>
+      <li><a href="{{ s.permalink | safe }}"{% if current == s.permalink %} aria-current="page"{% endif %}>Overview</a></li>
+      {%- for p in s.pages %}
+      <li><a href="{{ p.permalink | safe }}"{% if current == p.permalink %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+      {%- endfor %}
+    </ul>
+    {%- endfor %}
+  </nav>
+{% endmacro sidebar %}
+
+{% macro toc(headings) %}
+  {%- if headings | length > 1 %}
+  <nav class="toc" aria-label="On this page">
+    <p class="sidebar-title">On this page</p>
+    <ul>
+      {%- for h in headings %}
+      <li><a href="#{{ h.id }}">{{ h.title }}</a></li>
+      {%- endfor %}
+    </ul>
+  </nav>
+  {%- endif %}
+{% endmacro toc %}

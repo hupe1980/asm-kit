@@ -1,17 +1,27 @@
 //! Peephole optimizations for x86/x86-64 instructions.
 //!
 //! These optimizations transform instructions into shorter or more efficient
-//! encodings without changing observable behavior. They are applied when
-//! `OptLevel::Size` is active (the default).
+//! encodings. Which ones run is governed by [`OptLevel`]: the default
+//! [`OptLevel::Size`] is restricted to transforms that leave *all*
+//! architectural state (registers, memory, FLAGS) observably unchanged.
 //!
 //! ## Optimizations
 //!
-//! - **Zero-idiom**: `mov reg, 0` → `xor reg, reg` (saves 3–5 bytes, faster on modern CPUs)
-//! - **REX elimination**: `op r64, imm` where imm fits i32 and result is zero-extended from 32-bit
-//! - **NOP elimination**: `mov reg, reg` with same register → `nop` or removed
-//! - **Test conversion**: `and reg, reg` → `test reg, reg` (identical flags, does not write reg)
-//! - **Short AL/AX/EAX/RAX forms**: Uses accumulator-specific short encodings
-//! - **Sign-extended immediate**: `mov r64, imm` where imm fits i32 → `mov r32, imm32`
+//! State-preserving (applied at [`OptLevel::Size`], the default):
+//!
+//! - **Immediate narrowing**: `mov r64, imm` where `imm` fits `u32` →
+//!   `mov r32, imm32` (writes to a 32-bit register zero-extend, so the 64-bit
+//!   result is unchanged); saves the REX.W byte.
+//! - **REX elimination**: `and r64, imm` where `imm` fits `u32` →
+//!   `and r32, imm32` (the result's upper 32 bits are zero either way).
+//! - **Test conversion**: `and reg, reg` → `test reg, reg` (`r & r == r`, so
+//!   the destination is unchanged, and both set FLAGS identically).
+//!
+//! FLAGS-clobbering (requires [`OptLevel::Aggressive`]):
+//!
+//! - **Zero idiom**: `mov reg, 0` → `xor reg, reg` (saves 3–5 bytes and is
+//!   recognised as a dependency-breaking idiom by modern CPUs, but writes
+//!   FLAGS).
 
 use crate::ir::*;
 
@@ -19,21 +29,24 @@ use crate::ir::*;
 ///
 /// Returns `true` if the instruction was modified.
 ///
-/// # Side effects
-///
-/// The **zero-idiom** transform (`mov reg, 0` → `xor reg, reg`) clobbers
-/// FLAGS (sets ZF=1, clears CF/PF/SF/OF). This matches the behaviour of
-/// GAS and NASM at `-O2` and is safe whenever FLAGS are dead after the
-/// instruction, which is the common case in practice.
-pub fn optimize_instruction(instr: &mut Instruction, arch: Arch) -> bool {
-    if !matches!(arch, Arch::X86 | Arch::X86_64) {
+/// At [`OptLevel::Size`] every transform is observationally equivalent — the
+/// rewritten instruction leaves registers, memory *and FLAGS* exactly as the
+/// original would, so an assembler user never has to reason about whether
+/// optimization was on. Transforms that clobber FLAGS are gated behind
+/// [`OptLevel::Aggressive`].
+pub fn optimize_instruction(instr: &mut Instruction, arch: Arch, level: OptLevel) -> bool {
+    if !matches!(arch, Arch::X86 | Arch::X86_64) || level == OptLevel::None {
         return false;
     }
 
     let mut changed = false;
 
-    // Try each optimization in order of impact
-    changed |= try_zero_idiom(instr);
+    // FLAGS-clobbering transforms first — they replace the whole instruction.
+    if level == OptLevel::Aggressive {
+        changed |= try_zero_idiom(instr);
+    }
+
+    // State-preserving transforms.
     changed |= try_mov_imm32_narrow(instr, arch);
     changed |= try_rex_elimination(instr, arch);
     changed |= try_test_conversion(instr);
@@ -46,9 +59,8 @@ pub fn optimize_instruction(instr: &mut Instruction, arch: Arch) -> bool {
 /// This saves 3–5 bytes and is recognized as a zero-idiom by modern CPUs
 /// (no register dependency, no partial-register stall).
 ///
-/// Note: This clears flags (ZF=1, CF=PF=0, SF=OF=0). Only safe because
-/// in most contexts the flags are either unused or explicitly set after.
-/// We apply it unconditionally since GAS and NASM both do this at -O2.
+/// **Clobbers FLAGS** (sets ZF=1, PF=1; clears CF/SF/OF), so it only runs at
+/// [`OptLevel::Aggressive`] where the caller has asserted FLAGS are dead.
 fn try_zero_idiom(instr: &mut Instruction) -> bool {
     if instr.mnemonic != "mov" {
         return false;
@@ -240,7 +252,11 @@ mod tests {
             "mov",
             alloc::vec![Operand::Register(Register::Eax), Operand::Immediate(0)],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Aggressive
+        ));
         assert_eq!(instr.mnemonic, "xor");
         assert_eq!(instr.operands[0], Operand::Register(Register::Eax));
         assert_eq!(instr.operands[1], Operand::Register(Register::Eax));
@@ -252,7 +268,11 @@ mod tests {
             "mov",
             alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(0)],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Aggressive
+        ));
         assert_eq!(instr.mnemonic, "xor");
         // 64-bit narrowed to 32-bit for shorter encoding
         assert_eq!(instr.operands[0], Operand::Register(Register::Eax));
@@ -264,7 +284,11 @@ mod tests {
             "mov",
             alloc::vec![Operand::Register(Register::R12), Operand::Immediate(0)],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Aggressive
+        ));
         assert_eq!(instr.mnemonic, "xor");
         assert_eq!(instr.operands[0], Operand::Register(Register::R12d));
     }
@@ -275,7 +299,11 @@ mod tests {
             "mov",
             alloc::vec![Operand::Register(Register::Eax), Operand::Immediate(1)],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Aggressive
+        ));
         assert_eq!(instr.mnemonic, "mov");
     }
 
@@ -285,7 +313,11 @@ mod tests {
             "mov",
             alloc::vec![Operand::Register(Register::Al), Operand::Immediate(0)],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Aggressive
+        ));
         assert_eq!(instr.mnemonic, "mov");
     }
 
@@ -295,7 +327,11 @@ mod tests {
             "mov",
             alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(1)],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
         assert_eq!(instr.operands[0], Operand::Register(Register::Eax));
         assert_eq!(instr.operands[1], Operand::Immediate(1));
     }
@@ -309,7 +345,11 @@ mod tests {
                 Operand::Immediate(0xFFFF_FFFF),
             ],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
         assert_eq!(instr.operands[0], Operand::Register(Register::Eax));
     }
 
@@ -321,7 +361,11 @@ mod tests {
         );
         // -1 doesn't fit in unsigned 32-bit, so NOT narrowed
         // (needs REX.W + sign-extended imm32)
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
     }
 
     #[test]
@@ -333,7 +377,11 @@ mod tests {
                 Operand::Immediate(0x1_0000_0000),
             ],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
     }
 
     #[test]
@@ -345,7 +393,11 @@ mod tests {
                 Operand::Register(Register::Eax),
             ],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
         assert_eq!(instr.mnemonic, "test");
     }
 
@@ -358,7 +410,11 @@ mod tests {
                 Operand::Register(Register::Ebx),
             ],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
         assert_eq!(instr.mnemonic, "and");
     }
 
@@ -370,7 +426,11 @@ mod tests {
             "and",
             alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(0xFF)],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
         assert_eq!(instr.mnemonic, "and");
         assert_eq!(instr.operands[0], Operand::Register(Register::Eax));
         assert_eq!(instr.operands[1], Operand::Immediate(0xFF));
@@ -386,7 +446,11 @@ mod tests {
                 Operand::Immediate(0xFFFF_FFFF),
             ],
         );
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
         assert_eq!(instr.operands[0], Operand::Register(Register::R12d));
     }
 
@@ -397,7 +461,11 @@ mod tests {
             "and",
             alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(-1)],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
     }
 
     #[test]
@@ -410,7 +478,11 @@ mod tests {
                 Operand::Immediate(0x1_0000_0000),
             ],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
     }
 
     #[test]
@@ -421,14 +493,52 @@ mod tests {
             alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(5)],
         );
         // This one SHOULD narrow (and rax, 5 → and eax, 5)
-        assert!(optimize_instruction(&mut instr, Arch::X86_64));
+        assert!(optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
 
         // But add should NOT narrow
         let mut instr2 = make_instr(
             "add",
             alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(5)],
         );
-        assert!(!optimize_instruction(&mut instr2, Arch::X86_64));
+        assert!(!optimize_instruction(
+            &mut instr2,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
+    }
+
+    #[test]
+    fn zero_idiom_not_applied_at_default_level() {
+        // The default level must never clobber FLAGS: `mov eax, 0` between a
+        // `cmp` and a `sete` has to stay a `mov`.
+        let mut instr = make_instr(
+            "mov",
+            alloc::vec![Operand::Register(Register::Eax), Operand::Immediate(0)],
+        );
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::Size
+        ));
+        assert_eq!(instr.mnemonic, "mov");
+    }
+
+    #[test]
+    fn opt_level_none_disables_everything() {
+        let mut instr = make_instr(
+            "mov",
+            alloc::vec![Operand::Register(Register::Rax), Operand::Immediate(1)],
+        );
+        assert!(!optimize_instruction(
+            &mut instr,
+            Arch::X86_64,
+            OptLevel::None
+        ));
+        assert_eq!(instr.operands[0], Operand::Register(Register::Rax));
     }
 
     #[test]
@@ -437,6 +547,6 @@ mod tests {
             "and",
             alloc::vec![Operand::Register(Register::Eax), Operand::Immediate(0xFF)],
         );
-        assert!(!optimize_instruction(&mut instr, Arch::X86));
+        assert!(!optimize_instruction(&mut instr, Arch::X86, OptLevel::Size));
     }
 }

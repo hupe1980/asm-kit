@@ -16,11 +16,12 @@ A pure Rust multi-architecture assembly engine for offensive security.
 - 🦀 **Pure Rust** — `#![forbid(unsafe_code)]`, no C dependencies
 - 📦 **`no_std` support** — embedded and WASM environments (with `alloc`)
 - 🏗️ **Multi-architecture** — x86, x86-64, ARM32, Thumb/Thumb-2, AArch64, RISC-V
-- 🔄 **Intel & AT&T syntax** — full GAS-compatible AT&T with `.syntax att`/`.syntax intel`
+- 🔄 **Intel, AT&T & UAL syntax** — GAS-compatible AT&T via `.syntax att`, plus UAL `#immediate` and `@`/`//` comments for ARM/Thumb/AArch64
 - 🏷️ **Labels & constants** — forward/backward references, numeric labels, `.equ`/`.set`
 - 🔀 **Branch relaxation** — Szymanski's algorithm for optimal branch encoding
 - 📐 **Preprocessor** — `.macro`/`.rept`/`.irp`/`.if`/`.ifdef` directives
-- ⚡ **Peephole optimizer** — zero-idiom, MOV narrowing, REX elimination
+- ⚡ **Peephole optimizer** — MOV narrowing and REX elimination by default, all semantics-preserving; FLAGS-clobbering rewrites are opt-in
+- 🛡️ **Bounded by construction** — configurable limits on statements, labels, output size, recursion and macro expansion for untrusted input
 - 🔧 **Compile-time macros** — `asm_bytes!`/`asm_array!` for zero-overhead assembly
 - 🎯 **Literal pools** — `LDR Xn/Rn, =value` with automatic pool management (AArch64/ARM32)
 - 📋 **Listing output** — human-readable address/hex/source listing for debugging
@@ -33,18 +34,15 @@ A pure Rust multi-architecture assembly engine for offensive security.
 |:---|:---|:---|
 | **x86** | 32-bit, 16-bit real mode | Full ISA, `.code16`/`.code32` |
 | **x86-64** | 64-bit | SSE–SSE4.2, AVX/AVX2, AVX-512, AES-NI, BMI1/2, FMA3 |
-| **ARM32** | A32 (ARMv7) | Condition codes, barrel shifter, literal pools |
-| **Thumb** | T16/T32 | Auto 16/32-bit encoding, IT blocks |
-| **AArch64** | A64 (ARMv8+) | NEON/AdvSIMD, LSE atomics, literal pools |
+| **ARM32** | A32 (ARMv7) | Condition codes, barrel shifter, register ranges, literal pools |
+| **Thumb** | T16/T32 | Auto 16/32-bit encoding, IT blocks, register ranges |
+| **AArch64** | A64 (ARMv8+) | NEON/AdvSIMD, LSE atomics, shifted/extended/unscaled operands, vector lanes, literal pools |
 | **RISC-V** | RV32I, RV64I | M/A/C extensions, auto-compression |
 
 ## 🚀 Quick Start
 
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-asm-rs = "0.1"
+```sh
+cargo add asm-rs
 ```
 
 ### One-Shot Assembly
@@ -90,6 +88,27 @@ asm.emit(r#"
 "#).unwrap();
 ```
 
+### ARM / AArch64 with UAL Syntax
+
+```rust
+use asm_rs::{assemble, Arch};
+
+// `#` is the immediate prefix for ARM/Thumb/AArch64 (as in GNU as and the
+// Arm reference manuals); `@` and `//` start comments.
+let bytes = assemble("mov x0, #1  @ exit code", Arch::Aarch64).unwrap();
+
+// The prefix is optional — these assemble identically.
+assert_eq!(bytes, assemble("mov x0, 1", Arch::Aarch64).unwrap());
+
+// Barrel shifts and register extends are trailing operands, register lists
+// accept ranges, and vector lanes are addressable.
+assemble("add x0, x1, x2, lsl #3", Arch::Aarch64).unwrap();
+assemble("add x0, x1, w2, uxtw #2", Arch::Aarch64).unwrap();
+assemble("umov w0, v0.s[2]", Arch::Aarch64).unwrap();
+assemble("add r0, r1, r2, lsl r3", Arch::Arm).unwrap();
+assemble("push {r0-r7}", Arch::Thumb).unwrap();
+```
+
 ### Multi-Architecture Shellcode
 
 ```rust
@@ -124,7 +143,24 @@ const ARM_CODE: &[u8] = asm_bytes!(arm, "bx lr");
 
 ## 🧪 Testing
 
-Extensive test suite covering unit, integration, cross-validation (llvm-mc, iced-x86, yaxpeax-arm, riscv-decode), property-based (proptest), and fuzz testing (`cargo-fuzz`). Zero warnings, Miri clean.
+Extensive test suite covering unit, integration, property-based (proptest), and fuzz testing (`cargo-fuzz`), with zero warnings.
+
+Machine code is **cross-validated against independent decoders** rather than
+against itself — iced-x86 for x86/x86-64, bad64 and yaxpeax-arm for
+AArch64/ARM/Thumb, riscv-decode for RISC-V — at two levels:
+
+- **Encoding** — each instruction is assembled standalone and decoded back.
+- **Relocation** — branches to labels are swept across their full displacement
+  range, including the sign boundary and the ends of each encoding, and the
+  address the reference decoder computes is compared to the intended target.
+  Relocation bugs are invisible near zero displacement, so only a sweep finds
+  them.
+- **Differential fuzzing** — a fuzz target generates a branch to a known
+  address and asks an independent decoder where it actually goes. Asserting
+  "does not panic" cannot catch machine code that is well-formed but means the
+  wrong thing; this can.
+- **Documentation** — every instruction in the reference pages is assembled by
+  a test, so the docs cannot drift away from what the library supports.
 
 ## ⚙️ Configuration
 

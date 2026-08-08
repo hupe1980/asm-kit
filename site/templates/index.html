@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Pure Rust · <code>#![forbid(unsafe_code)]</code> · <code>no_std</code></p>
+    <h1>Assembly to machine code,<br>at runtime.</h1>
+    <p class="lede">
+      <strong>asm-rs</strong> turns assembly source text into machine code bytes for
+      x86, x86-64, ARM32, Thumb, AArch64 and RISC-V — with labels, branch
+      relaxation and a full preprocessor. No LLVM, no system assembler, no C.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') | safe }}">Get started</a>
+      <a class="btn" href="{{ get_url(path='@/docs/reference/_index.md') | safe }}">ISA reference</a>
+    </div>
+    <div class="install">
+      <code>cargo add asm-rs</code>
+    </div>
+  </div>
+</section>
+
+<section class="wrap section">
+  <div class="split">
+    <div>
+      <h2>One call, machine code out</h2>
+      <p>
+        The whole pipeline — preprocessor, lexer, parser, optimizer, encoder,
+        linker — sits behind one function. Labels resolve, branches relax to
+        the shortest form that reaches, and you get bytes.
+      </p>
+    </div>
+<pre><code class="language-rust">use asm_rs::{assemble, Arch};
+
+let code = assemble("
+    xor  edi, edi        # status = 0
+    mov  eax, 60         # __NR_exit
+    syscall
+", Arch::X86_64)?;
+
+assert_eq!(code, [0x31, 0xFF, 0xB8, 0x3C, 0, 0, 0, 0x0F, 0x05]);
+</code></pre>
+  </div>
+</section>
+
+<section class="wrap section">
+  <h2>Why asm-rs</h2>
+  <div class="cards">
+
+    <article class="card">
+      <h3>Correct, and checked against someone else</h3>
+      <p>
+        Output is cross-validated against <em>independent</em> decoders —
+        iced-x86, bad64, yaxpeax-arm, riscv-decode — not against asm-rs's own
+        expectations. Branch displacements are swept across each encoding's
+        full range, and a differential fuzz target asks a decoder where each
+        branch really goes.
+      </p>
+    </article>
+
+    <article class="card">
+      <h3>No <code>unsafe</code>, anywhere</h3>
+      <p>
+        <code>#![forbid(unsafe_code)]</code> at the crate root, with zero
+        required runtime dependencies. Memory safety is a property of the
+        build, not a promise in a README.
+      </p>
+    </article>
+
+    <article class="card">
+      <h3>Built for untrusted input</h3>
+      <p>
+        Every unbounded operation is metered — statements, labels, output size,
+        macro recursion and expansion. Limits return errors rather than
+        exhausting memory, so you can hand it text you did not write.
+      </p>
+    </article>
+
+    <article class="card">
+      <h3>Runs where Rust runs</h3>
+      <p>
+        <code>no_std</code> + <code>alloc</code>, so it embeds in firmware,
+        kernels and WebAssembly. Per-architecture Cargo features keep only what
+        you use.
+      </p>
+    </article>
+
+    <article class="card">
+      <h3>Predictable by default</h3>
+      <p>
+        The default optimization level only applies transforms that leave
+        registers, memory <em>and flags</em> observably unchanged. Rewrites that
+        clobber flags are opt-in, so output never surprises you.
+      </p>
+    </article>
+
+    <article class="card">
+      <h3>Compile time, too</h3>
+      <p>
+        <code>asm_bytes!</code> and <code>asm_array!</code> assemble during
+        compilation and emit a <code>const</code> byte array — no runtime cost,
+        no runtime failure mode.
+      </p>
+    </article>
+
+  </div>
+</section>
+
+<section class="wrap section">
+  <h2>Six targets, one API</h2>
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>Architecture</th><th>Variants</th><th>Coverage</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>x86</strong></td><td>32-bit, 16-bit real mode</td><td>Full base ISA, <code>.code16</code>/<code>.code32</code></td></tr>
+        <tr><td><strong>x86-64</strong></td><td>64-bit</td><td>SSE–SSE4.2, AVX/AVX2, AVX-512, AES-NI, BMI1/2, FMA3</td></tr>
+        <tr><td><strong>ARM32</strong></td><td>A32 (ARMv7)</td><td>Condition codes, barrel shifter, register ranges, literal pools</td></tr>
+        <tr><td><strong>Thumb</strong></td><td>T16 / T32</td><td>Automatic 16/32-bit selection, IT blocks</td></tr>
+        <tr><td><strong>AArch64</strong></td><td>A64 (ARMv8+)</td><td>NEON/AdvSIMD, LSE atomics, shifted/extended operands, vector lanes</td></tr>
+        <tr><td><strong>RISC-V</strong></td><td>RV32I / RV64I</td><td>M/A/C extensions, optional F/D and V, auto-compression</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><a href="{{ get_url(path='@/docs/reference/_index.md') | safe }}">Full instruction reference →</a></p>
+</section>
+
+<section class="wrap section">
+  <div class="split">
+<pre><code class="language-rust">use asm_rs::{Assembler, Arch};
+
+let mut asm = Assembler::new(Arch::Aarch64);
+asm.emit("
+loop:
+    subs x0, x0, #1     // UAL `#` immediates
+    b.ne loop           // backward branch, resolved
+    ret
+")?;
+
+let out = asm.finish()?;
+println!("{}", out.listing());
+</code></pre>
+    <div>
+      <h2>Labels and relaxation, handled</h2>
+      <p>
+        Forward and backward references resolve automatically. Branches start
+        in their short form and grow only when a target is out of reach —
+        Szymanski's monotonic algorithm, so layout always converges.
+      </p>
+      <p>
+        A target the encoding cannot represent — too far, or misaligned for a
+        scaled displacement — is an error, never a silently truncated jump.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap section cta-band">
+  <h2>Start assembling</h2>
+  <p class="lede">Add one dependency and call one function.</p>
+  <div class="cta">
+    <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') | safe }}">Read the guide</a>
+    <a class="btn" href="{{ config.extra.api_docs }}">API documentation</a>
+  </div>
+</section>
+
+{% endblock content %}
