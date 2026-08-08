@@ -173,6 +173,13 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Run each target briefly
         working-directory: fuzz
+        env:
+          # LeakSanitizer reports ~550 bytes of one-time runtime/decoder init on
+          # the empty unit libFuzzer runs first, before any target code executes.
+          # It has to be switched off in the ASan runtime: libFuzzer's own
+          # -detect_leaks=0 only suppresses its between-runs check, not the
+          # sanitizer's. cargo-fuzz appends its detect_odr_violation=0 to this.
+          ASAN_OPTIONS: detect_leaks=0
         run: |
           # fuzz_differential is listed first: it checks the assembler's output
           # against independent decoders, so it catches machine code that is
@@ -180,12 +187,7 @@ jobs:
           # targets cannot see.
           for target in fuzz_differential fuzz_x86_64 fuzz_arm fuzz_aarch64 fuzz_riscv; do
             echo "::group::$target"
-            # -detect_leaks=0: LeakSanitizer fires on the empty unit libFuzzer
-            # runs first, before any target code executes — the allocations are
-            # one-time runtime/decoder init that is never freed by design. These
-            # targets assert panic-freedom and correct encodings, not memory
-            # hygiene, so the leak check only produces noise here.
-            cargo fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=4096 -detect_leaks=0
+            cargo fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=4096
             echo "::endgroup::"
           done
       - name: Upload crash artifacts
