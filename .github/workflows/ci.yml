@@ -180,7 +180,12 @@ jobs:
           # targets cannot see.
           for target in fuzz_differential fuzz_x86_64 fuzz_arm fuzz_aarch64 fuzz_riscv; do
             echo "::group::$target"
-            cargo fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=4096
+            # -detect_leaks=0: LeakSanitizer fires on the empty unit libFuzzer
+            # runs first, before any target code executes — the allocations are
+            # one-time runtime/decoder init that is never freed by design. These
+            # targets assert panic-freedom and correct encodings, not memory
+            # hygiene, so the leak check only produces noise here.
+            cargo fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=4096 -detect_leaks=0
             echo "::endgroup::"
           done
       - name: Upload crash artifacts
