@@ -20,7 +20,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use asm_rs::{Arch, Assembler};
+use asm_kit::{Arch, Assembler};
 
 /// One generated case: which branch to emit and how far away its target is.
 struct Case {

@@ -1,26 +1,26 @@
 +++
 title = "API Overview"
-description = "How the asm-rs API is shaped: one-shot functions, the Assembler builder, AssemblyResult, error handling and the compile-time macros."
+description = "How the asm-kit API is shaped: one-shot functions, the Assembler builder, AssemblyResult, error handling and the compile-time macros."
 weight = 3
 +++
 
 This page explains how the API fits together and which entry point to reach for.
 For exact signatures, field types and every method — always current, because it
 is generated from the source — see
-[docs.rs/asm-rs](https://docs.rs/asm-rs).
+[docs.rs/asm-kit](https://docs.rs/asm-kit).
 
 ## Three ways in
 
 | You want | Use | Cost |
 |:---------|:----|:-----|
-| Bytes from a string, nothing else | [`assemble`](https://docs.rs/asm-rs/latest/asm_rs/fn.assemble.html) | One call |
-| Labels, a base address, listings, limits | [`Assembler`](https://docs.rs/asm-rs/latest/asm_rs/assembler/struct.Assembler.html) | A few lines of setup |
-| A constant known at compile time | [`asm_bytes!`](https://docs.rs/asm-rs-macros/) | Zero at runtime |
+| Bytes from a string, nothing else | [`assemble`](https://docs.rs/asm-kit/latest/asm_kit/fn.assemble.html) | One call |
+| Labels, a base address, listings, limits | [`Assembler`](https://docs.rs/asm-kit/latest/asm_kit/assembler/struct.Assembler.html) | A few lines of setup |
+| A constant known at compile time | [`asm_bytes!`](https://docs.rs/asm-kit-macros/) | Zero at runtime |
 
 ### One-shot
 
 ```rust
-use asm_rs::{assemble, assemble_at, Arch};
+use asm_kit::{assemble, assemble_at, Arch};
 
 // Position-independent: labels resolve relative to 0.
 let code = assemble("
@@ -41,7 +41,7 @@ appends — and `finish()` consumes the assembler to resolve labels, relax
 branches and produce the output.
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.base_address(0x40_1000);
@@ -70,11 +70,11 @@ assembler can be reused across independent jobs.
 
 ## What comes back
 
-[`AssemblyResult`](https://docs.rs/asm-rs/latest/asm_rs/assembler/struct.AssemblyResult.html)
+[`AssemblyResult`](https://docs.rs/asm-kit/latest/asm_kit/assembler/struct.AssemblyResult.html)
 holds the bytes plus everything the linker learned while producing them:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit("start:\n  jmp start")?;
@@ -99,8 +99,8 @@ for reloc in result.relocations() {
 ## Errors
 
 Every fallible call returns
-[`AsmError`](https://docs.rs/asm-rs/latest/asm_rs/error/enum.AsmError.html),
-which carries a [`Span`](https://docs.rs/asm-rs/latest/asm_rs/error/struct.Span.html)
+[`AsmError`](https://docs.rs/asm-kit/latest/asm_kit/error/enum.AsmError.html),
+which carries a [`Span`](https://docs.rs/asm-kit/latest/asm_kit/error/struct.Span.html)
 — line, column, byte offset and length — so a diagnostic can point at the
 source. It implements `Display`, and `std::error::Error` when the `std` feature
 is on.
@@ -112,7 +112,7 @@ a relaxation that did not converge, and an exceeded resource limit. `Multiple`
 carries several at once when a single `emit()` produced more than one.
 
 ```rust
-use asm_rs::{assemble, Arch, AsmError};
+use asm_kit::{assemble, Arch, AsmError};
 
 match assemble("mov rax, rbx, rcx", Arch::X86_64) {
     Ok(bytes) => println!("{} bytes", bytes.len()),
@@ -125,12 +125,12 @@ match assemble("mov rax, rbx, rcx", Arch::X86_64) {
 
 ## Compile-time macros
 
-`asm-rs-macros` runs the assembler during compilation and emits a constant, so
+`asm-kit-macros` runs the assembler during compilation and emits a constant, so
 there is no runtime cost — and no runtime failure mode, because a bad
 instruction is a compile error.
 
 ```rust
-use asm_rs_macros::{asm_array, asm_bytes};
+use asm_kit_macros::{asm_array, asm_bytes};
 
 const SHELLCODE: &[u8] = asm_bytes!(x86_64, "xor eax, eax; inc eax; ret");
 const NOP: [u8; 1] = asm_array!(x86_64, "nop");

@@ -78,7 +78,7 @@ run_check "tests" cargo test --workspace --all-features
 # ── no_std build ───────────────────────────────────────────
 step "no_std build"
 ensure_target thumbv7em-none-eabihf
-if cargo build -p asm-rs --no-default-features \
+if cargo build -p asm-kit --no-default-features \
     --features "x86,x86_64,arm,aarch64,riscv" \
     --target thumbv7em-none-eabihf; then
   pass "no_std build"
@@ -89,7 +89,7 @@ fi
 # ── WASM build ─────────────────────────────────────────────
 step "WASM build"
 ensure_target wasm32-unknown-unknown
-if cargo check -p asm-rs --target wasm32-unknown-unknown --all-features; then
+if cargo check -p asm-kit --target wasm32-unknown-unknown --all-features; then
   pass "WASM build"
 else
   fail "WASM build"
@@ -99,7 +99,7 @@ fi
 step "WASM tests"
 if command -v wasm-bindgen &>/dev/null; then
   if WASM_BINDGEN_TEST_ONLY_NODE=1 \
-      cargo test -p asm-rs --target wasm32-unknown-unknown \
+      cargo test -p asm-kit --target wasm32-unknown-unknown \
       --test wasm_integration --features "x86,x86_64,arm,aarch64,riscv"; then
     pass "WASM tests"
   else
@@ -129,7 +129,7 @@ FEATURE_SETS=(
 step "feature subsets"
 ALL_FEATURES_OK=true
 for features in "${FEATURE_SETS[@]}"; do
-  if cargo check -p asm-rs --no-default-features --features "std,$features"; then
+  if cargo check -p asm-kit --no-default-features --features "std,$features"; then
     echo -e "  ${GREEN}✓${RESET} $features"
   else
     echo -e "  ${RED}✗${RESET} $features"
@@ -143,7 +143,7 @@ else
 fi
 
 # ── Publish dry-run ────────────────────────────────────────
-run_check "publish dry-run" cargo publish -p asm-rs --dry-run --allow-dirty
+run_check "publish dry-run" cargo publish -p asm-kit --dry-run --allow-dirty
 
 # ── Slow checks (skip with --quick) ───────────────────────
 if ! $QUICK; then

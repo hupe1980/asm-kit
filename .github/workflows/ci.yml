@@ -63,7 +63,7 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p asm-rs --no-default-features --features "x86,x86_64,arm,aarch64,riscv" --target thumbv7em-none-eabihf
+      - run: cargo build -p asm-kit --no-default-features --features "x86,x86_64,arm,aarch64,riscv" --target thumbv7em-none-eabihf
 
   # ── WASM build + tests ───────────────────────────────────
   wasm:
@@ -90,7 +90,7 @@ jobs:
       - name: Run WASM tests
         env:
           WASM_BINDGEN_TEST_ONLY_NODE: "1"
-        run: cargo test -p asm-rs --target wasm32-unknown-unknown --test wasm_integration --features "x86,x86_64,arm,aarch64,riscv"
+        run: cargo test -p asm-kit --target wasm32-unknown-unknown --test wasm_integration --features "x86,x86_64,arm,aarch64,riscv"
 
   # ── Benchmarks (compile check only) ──────────────────────
   bench:
@@ -123,7 +123,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo publish -p asm-rs --dry-run
+      - run: cargo publish -p asm-kit --dry-run
 
   # ── Feature subset builds ────────────────────────────────
   features:
@@ -144,7 +144,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p asm-rs --no-default-features --features "std,${{ matrix.features }}"
+      - run: cargo check -p asm-kit --no-default-features --features "std,${{ matrix.features }}"
 
   # ── MSRV check ────────────────────────────────────────────
   msrv:

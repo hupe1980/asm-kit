@@ -1,5 +1,5 @@
 [package]
-name = "asm_rs-fuzz"
+name = "asm_kit-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -17,8 +17,8 @@ iced-x86 = { version = "1", default-features = false, features = ["std", "decode
 bad64 = "0.12"
 riscv-decode = "0.2"
 
-[dependencies.asm-rs]
-path = "../crates/asm-rs"
+[dependencies.asm-kit]
+path = "../crates/asm-kit"
 features = ["std", "x86", "x86_64", "arm", "aarch64", "riscv", "riscv_f"]
 
 # Prevent this from interfering with workspaces

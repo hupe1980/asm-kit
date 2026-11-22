@@ -38,19 +38,19 @@ weight = 2
 
 ```sh
 # Default: all architectures, all default SIMD extensions
-cargo add asm-rs
+cargo add asm-kit
 
 # x86-64 only (minimal binary size)
-cargo add asm-rs --no-default-features --features std,x86_64,avx,avx512
+cargo add asm-kit --no-default-features --features std,x86_64,avx,avx512
 
 # no_std for embedded/WASM
-cargo add asm-rs --no-default-features --features x86_64
+cargo add asm-kit --no-default-features --features x86_64
 
 # With serde support
-cargo add asm-rs --features serde
+cargo add asm-kit --features serde
 
 # ARM only
-cargo add asm-rs --no-default-features --features std,arm,aarch64,neon
+cargo add asm-kit --no-default-features --features std,arm,aarch64,neon
 ```
 
 ## Runtime Options
@@ -60,7 +60,7 @@ cargo add asm-rs --no-default-features --features std,arm,aarch64,neon
 Peephole optimizations are controlled at runtime via `OptLevel`:
 
 ```rust
-use asm_rs::{Assembler, Arch, OptLevel};
+use asm_kit::{Assembler, Arch, OptLevel};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.optimize(OptLevel::Size);        // Shorter encodings, same semantics (default)
@@ -103,7 +103,7 @@ Enable `Aggressive` only where FLAGS are dead after the rewritten instruction.
 ### Syntax
 
 ```rust
-use asm_rs::{Assembler, Arch, Syntax};
+use asm_kit::{Assembler, Arch, Syntax};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.syntax(Syntax::Att);   // AT&T / GAS syntax
@@ -122,7 +122,7 @@ mov rbx, 42
 ### Base Address
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.base_address(0x401000); // Set the base address for label resolution
@@ -133,7 +133,7 @@ asm.base_address(0x401000); // Set the base address for label resolution
 Pre-define label addresses for linking against external code:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.define_external("printf", 0x401000);
@@ -145,7 +145,7 @@ asm.emit("mov rax, printf").unwrap();
 Define assembly-time constants:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.define_constant("SYS_EXIT", 60);
@@ -158,7 +158,7 @@ asm.emit("mov eax, SYS_EXIT").unwrap();
 Define symbols for conditional assembly:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.define_preprocessor_symbol("DEBUG", 1);
@@ -175,7 +175,7 @@ asm.emit(r#"
 Enable human-readable listing output for debugging:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.base_address(0x401000);
@@ -192,14 +192,14 @@ println!("{}", result.listing());
 
 ## Resource Limits
 
-`asm-rs` is built to assemble text it did not write — exploit compilers, JIT
+`asm-kit` is built to assemble text it did not write — exploit compilers, JIT
 front-ends and shellcode generators routinely feed it attacker-influenced
 input. Every unbounded operation in the pipeline is therefore metered, and
 exceeding a limit returns `AsmError::ResourceLimitExceeded` rather than
 exhausting memory or aborting the process.
 
 ```rust
-use asm_rs::{Assembler, Arch, ResourceLimits};
+use asm_kit::{Assembler, Arch, ResourceLimits};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.limits(ResourceLimits {
@@ -360,7 +360,7 @@ add   sp, sp, x0              // SP forces the extend encoding automatically
 
 On AArch64, register number 31 means `SP` in the add/sub immediate, add/sub
 extended-register and load/store base positions, and the zero register
-everywhere else. `asm-rs` picks the encoding that can actually name `SP` when
+everywhere else. `asm-kit` picks the encoding that can actually name `SP` when
 one appears; `adds sp, ...` is rejected, because the flag-setting form cannot
 write `SP` at all.
 

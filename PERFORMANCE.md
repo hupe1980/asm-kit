@@ -1,6 +1,6 @@
 # Performance
 
-Benchmark results for `asm-rs`, measured with [Criterion.rs](https://github.com/bheisler/criterion.rs).
+Benchmark results for `asm-kit`, measured with [Criterion.rs](https://github.com/bheisler/criterion.rs).
 
 **Hardware**: Apple Silicon (M-series), macOS, Rust 1.97.1.
 **Run**: `cargo bench --bench throughput`

@@ -6,7 +6,7 @@
     <p class="eyebrow">Pure Rust · <code>#![forbid(unsafe_code)]</code> · <code>no_std</code></p>
     <h1>Assembly to machine code,<br>at runtime.</h1>
     <p class="lede">
-      <strong>asm-rs</strong> turns assembly source text into machine code bytes for
+      <strong>asm-kit</strong> turns assembly source text into machine code bytes for
       x86, x86-64, ARM32, Thumb, AArch64 and RISC-V — with labels, branch
       relaxation and a full preprocessor. No LLVM, no system assembler, no C.
     </p>
@@ -15,7 +15,7 @@
       <a class="btn" href="{{ get_url(path='@/docs/reference/_index.md') | safe }}">ISA reference</a>
     </div>
     <div class="install">
-      <code>cargo add asm-rs</code>
+      <code>cargo add asm-kit</code>
     </div>
   </div>
 </section>
@@ -30,7 +30,7 @@
         the shortest form that reaches, and you get bytes.
       </p>
     </div>
-<pre><code class="language-rust">use asm_rs::{assemble, Arch};
+<pre><code class="language-rust">use asm_kit::{assemble, Arch};
 
 let code = assemble("
     xor  edi, edi        # status = 0
@@ -44,14 +44,14 @@ assert_eq!(code, [0x31, 0xFF, 0xB8, 0x3C, 0, 0, 0, 0x0F, 0x05]);
 </section>
 
 <section class="wrap section">
-  <h2>Why asm-rs</h2>
+  <h2>Why asm-kit</h2>
   <div class="cards">
 
     <article class="card">
       <h3>Correct, and checked against someone else</h3>
       <p>
         Output is cross-validated against <em>independent</em> decoders —
-        iced-x86, bad64, yaxpeax-arm, riscv-decode — not against asm-rs's own
+        iced-x86, bad64, yaxpeax-arm, riscv-decode — not against asm-kit's own
         expectations. Branch displacements are swept across each encoding's
         full range, and a differential fuzz target asks a decoder where each
         branch really goes.
@@ -128,7 +128,7 @@ assert_eq!(code, [0x31, 0xFF, 0xB8, 0x3C, 0, 0, 0, 0x0F, 0x05]);
 
 <section class="wrap section">
   <div class="split">
-<pre><code class="language-rust">use asm_rs::{Assembler, Arch};
+<pre><code class="language-rust">use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::Aarch64);
 asm.emit("
