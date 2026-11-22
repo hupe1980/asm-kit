@@ -14,4 +14,4 @@ repository.workspace = true
 proc-macro = true
 
 [dependencies]
-asm-kit = { version = "0.2.0", path = "../asm-kit", default-features = true }
+asm-kit = { version = "0.2.1", path = "../asm-kit", default-features = true }
