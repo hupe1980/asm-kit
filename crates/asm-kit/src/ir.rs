@@ -4568,4 +4568,283 @@ mod tests {
         // Still has unresolved label
         assert_eq!(e.eval(), None);
     }
+
+    /// Parse `name` for `arch`, failing the test with a readable message.
+    fn reg(name: &str, arch: Arch) -> Register {
+        crate::parser::parse_register(name, arch)
+            .unwrap_or_else(|| panic!("`{name}` should parse as a {arch} register"))
+    }
+
+    #[test]
+    fn arch_display_and_arch_name_cover_every_variant() {
+        use crate::error::ArchName;
+        let cases = [
+            (Arch::X86, "x86", ArchName::X86),
+            (Arch::X86_64, "x86_64", ArchName::X86_64),
+            (Arch::Arm, "ARM", ArchName::Arm),
+            (Arch::Thumb, "Thumb", ArchName::Thumb),
+            (Arch::Aarch64, "AArch64", ArchName::Aarch64),
+            (Arch::Rv32, "RV32", ArchName::Rv32),
+            (Arch::Rv64, "RV64", ArchName::Rv64),
+        ];
+        for (arch, shown, name) in cases {
+            assert_eq!(alloc::format!("{arch}"), shown);
+            assert_eq!(arch.to_arch_name(), name);
+        }
+    }
+
+    /// Every numbered AArch64 register must report the number in its name and
+    /// the width implied by its prefix, across all register files.
+    #[test]
+    fn aarch64_register_tables_are_consistent() {
+        let a = Arch::Aarch64;
+        for n in 0u8..=30 {
+            for (prefix, bits) in [("x", 64), ("w", 32)] {
+                let r = reg(&alloc::format!("{prefix}{n}"), a);
+                assert!(r.is_aarch64(), "{r:?}");
+                assert_eq!(r.a64_reg_num(), n, "{r:?}");
+                assert_eq!(r.size_bits(), bits, "{r:?}");
+                assert_eq!(r.is_a64_64bit(), bits == 64, "{r:?}");
+            }
+        }
+        for n in 0u8..=31 {
+            for (prefix, bits) in [
+                ("v", 128),
+                ("q", 128),
+                ("d", 64),
+                ("s", 32),
+                ("h", 16),
+                ("b", 8),
+            ] {
+                let r = reg(&alloc::format!("{prefix}{n}"), a);
+                assert!(r.is_a64_simd_fp() || r.is_a64_vector(), "{r:?}");
+                assert_eq!(r.a64_reg_num(), n, "{r:?}");
+                assert_eq!(r.size_bits(), bits, "{r:?}");
+                assert_eq!(r.a64_simd_fp_bits(), u32::from(bits), "{r:?}");
+            }
+            let z = reg(&alloc::format!("z{n}"), a);
+            assert!(z.is_a64_sve_z(), "{z:?}");
+            assert_eq!(z.a64_reg_num(), n, "{z:?}");
+            assert_eq!(z.size_bits(), 0, "scalable");
+        }
+        for n in 0u8..=15 {
+            let p = reg(&alloc::format!("p{n}"), a);
+            assert!(p.is_a64_sve_p(), "{p:?}");
+            assert_eq!(p.a64_p_num(), n, "{p:?}");
+            assert_eq!(p.size_bits(), 0, "scalable");
+        }
+        for (name, bits) in [("sp", 64), ("xzr", 64), ("wzr", 32), ("wsp", 32)] {
+            let r = reg(name, a);
+            assert_eq!(r.a64_reg_num(), 31, "{name}");
+            assert_eq!(r.size_bits(), bits, "{name}");
+        }
+        // Non-AArch64 registers fall through to the default arms.
+        assert_eq!(Register::Rax.a64_reg_num(), 0);
+        assert_eq!(Register::Rax.a64_p_num(), 0);
+    }
+
+    #[test]
+    fn riscv_register_tables_are_consistent() {
+        for arch in [Arch::Rv32, Arch::Rv64] {
+            for n in 0u8..=31 {
+                let x = reg(&alloc::format!("x{n}"), arch);
+                assert!(x.is_riscv(), "{x:?}");
+                assert_eq!(x.rv_reg_num(), n, "{x:?}");
+                assert_eq!(x.size_bits(), 0, "XLEN-dependent");
+
+                let f = reg(&alloc::format!("f{n}"), arch);
+                assert!(f.is_riscv_fp(), "{f:?}");
+                assert_eq!(f.rv_fp_reg_num(), n, "{f:?}");
+                assert_eq!(f.size_bits(), 0, "extension-dependent");
+
+                let v = reg(&alloc::format!("v{n}"), arch);
+                assert!(v.is_riscv_vec(), "{v:?}");
+                assert_eq!(v.rv_vec_num(), n, "{v:?}");
+                assert_eq!(v.size_bits(), 0, "scalable");
+            }
+        }
+        assert_eq!(Register::Rax.rv_reg_num(), 0);
+        assert_eq!(Register::Rax.rv_vec_num(), 0);
+    }
+
+    #[test]
+    fn arm_register_numbers_round_trip() {
+        for n in 0u8..=15 {
+            let r = reg(&alloc::format!("r{n}"), Arch::Arm);
+            assert!(r.is_arm(), "{r:?}");
+            assert_eq!(r.arm_reg_num(), n, "{r:?}");
+            assert_eq!(r.size_bits(), 32, "{r:?}");
+            assert_eq!(Register::from_arm_reg_num(n), Some(r), "r{n}");
+        }
+        assert_eq!(Register::from_arm_reg_num(16), None);
+    }
+
+    /// x86 vector/mask registers encode their index mod 8 in ModR/M, report
+    /// their architectural width, and print back to the name they parse from.
+    #[test]
+    fn x86_register_tables_are_consistent() {
+        let a = Arch::X86_64;
+        let files: [(&str, u8, u16); 4] = [
+            ("xmm", 32, 128),
+            ("ymm", 16, 256),
+            ("zmm", 32, 512),
+            ("k", 8, 64),
+        ];
+        for (prefix, count, bits) in files {
+            for n in 0..count {
+                let name = alloc::format!("{prefix}{n}");
+                let r = match crate::parser::parse_register(&name, a) {
+                    Some(r) => r,
+                    // xmm16–31 are EVEX-only; tolerate a parser that does not model them.
+                    None if prefix == "xmm" && n >= 16 => continue,
+                    None => panic!("`{name}` should parse"),
+                };
+                assert_eq!(r.base_code(), n % 8, "{name}");
+                assert_eq!(r.size_bits(), bits, "{name}");
+                assert_eq!(alloc::format!("{r}"), name);
+            }
+        }
+        for (name, code) in [
+            ("es", 0),
+            ("cs", 1),
+            ("ss", 2),
+            ("ds", 3),
+            ("fs", 4),
+            ("gs", 5),
+        ] {
+            let r = reg(name, a);
+            assert_eq!(r.base_code(), code, "{name}");
+            assert_eq!(r.size_bits(), 16, "{name}");
+        }
+        assert_eq!(reg("rip", a).base_code(), 5);
+
+        let gprs = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
+        for g in gprs {
+            let r64 = reg(&alloc::format!("r{g}"), a);
+            let r32 = reg(&alloc::format!("e{g}"), a);
+            assert_eq!(r64.to_32bit(), Some(r32), "r{g}");
+            assert_eq!(r32.to_32bit(), Some(r32), "e{g}");
+        }
+        for n in 8..=15 {
+            let r64 = reg(&alloc::format!("r{n}"), a);
+            let r32 = reg(&alloc::format!("r{n}d"), a);
+            assert_eq!(r64.to_32bit(), Some(r32), "r{n}");
+            assert_eq!(r32.to_32bit(), Some(r32), "r{n}d");
+        }
+        assert_eq!(Register::Al.to_32bit(), None);
+    }
+
+    #[test]
+    fn vector_arrangement_parse_display_round_trip() {
+        use VectorArrangement as V;
+        // (text, value, element bits, total bits, lanes, SVE size)
+        let cases = [
+            ("8B", V::B8, 8, 64, 8, None),
+            ("16B", V::B16, 8, 128, 16, None),
+            ("4H", V::H4, 16, 64, 4, None),
+            ("8H", V::H8, 16, 128, 8, None),
+            ("2S", V::S2, 32, 64, 2, None),
+            ("4S", V::S4, 32, 128, 4, None),
+            ("1D", V::D1, 64, 64, 1, None),
+            ("2D", V::D2, 64, 128, 2, None),
+            ("B", V::SveB, 8, 0, 0, Some(0)),
+            ("H", V::SveH, 16, 0, 0, Some(1)),
+            ("S", V::SveS, 32, 0, 0, Some(2)),
+            ("D", V::SveD, 64, 0, 0, Some(3)),
+        ];
+        for (text, v, elem, total, lanes, sve) in cases {
+            assert_eq!(V::parse(text), Some(v), "{text}");
+            assert_eq!(V::parse(&text.to_ascii_lowercase()), Some(v), "{text}");
+            assert_eq!(alloc::format!("{v}"), text);
+            assert_eq!(v.element_bits(), elem, "{text}");
+            assert_eq!(v.total_bits(), total, "{text}");
+            assert_eq!(v.lane_count(), lanes, "{text}");
+            assert_eq!(v.sve_size(), sve, "{text}");
+        }
+        assert_eq!(V::parse("3s"), None);
+        assert_eq!(V::parse("16bxx"), None);
+        assert_eq!(
+            alloc::format!("{}{}", SvePredQual::Merging, SvePredQual::Zeroing),
+            "/m/z"
+        );
+    }
+
+    #[test]
+    fn element_size_tables() {
+        use ElementSize as E;
+        for (text, e, lanes) in [
+            ("b", E::B, 16),
+            ("h", E::H, 8),
+            ("s", E::S, 4),
+            ("d", E::D, 2),
+        ] {
+            assert_eq!(E::from_lower(text), Some(e));
+            assert_eq!(alloc::format!("{e}"), text);
+            assert_eq!(e.lane_count(), lanes);
+        }
+        assert_eq!(E::from_lower("q"), None);
+        // imm5 = index shifted past a one-hot size marker; imm4 = index scaled by size.
+        assert_eq!(E::B.imm5(3), 0b0_0111);
+        assert_eq!(E::H.imm5(3), 0b0_1110);
+        assert_eq!(E::S.imm5(1), 0b0_1100);
+        assert_eq!(E::D.imm5(1), 0b1_1000);
+        assert_eq!(E::B.imm4(5), 5);
+        assert_eq!(E::H.imm4(5), 10);
+        assert_eq!(E::S.imm4(3), 12);
+        assert_eq!(E::D.imm4(1), 8);
+    }
+
+    #[test]
+    fn shift_op_tables() {
+        use ShiftOp as S;
+        // (text, op, shift-type field, extend-option field)
+        let cases = [
+            ("lsl", S::Lsl, Some(0b00), None),
+            ("lsr", S::Lsr, Some(0b01), None),
+            ("asr", S::Asr, Some(0b10), None),
+            ("ror", S::Ror, Some(0b11), None),
+            ("rrx", S::Rrx, Some(0b11), None),
+            ("msl", S::Msl, None, None),
+            ("uxtb", S::Uxtb, None, Some(0b000)),
+            ("uxth", S::Uxth, None, Some(0b001)),
+            ("uxtw", S::Uxtw, None, Some(0b010)),
+            ("uxtx", S::Uxtx, None, Some(0b011)),
+            ("sxtb", S::Sxtb, None, Some(0b100)),
+            ("sxth", S::Sxth, None, Some(0b101)),
+            ("sxtw", S::Sxtw, None, Some(0b110)),
+            ("sxtx", S::Sxtx, None, Some(0b111)),
+        ];
+        for (text, op, ty, ext) in cases {
+            assert_eq!(S::from_lower(text), Some(op), "{text}");
+            assert_eq!(alloc::format!("{op}"), text);
+            assert_eq!(op.shift_type_bits(), ty, "{text}");
+            assert_eq!(op.extend_option_bits(), ext, "{text}");
+        }
+        assert_eq!(S::from_lower("rol"), None);
+
+        assert_eq!(alloc::format!("{}", ShiftAmount::Immediate(3)), " #3");
+        assert_eq!(
+            alloc::format!("{}", ShiftAmount::Register(Register::Rcx)),
+            " rcx"
+        );
+        assert_eq!(alloc::format!("{}", ShiftAmount::None), "");
+    }
+
+    #[test]
+    fn operand_size_bits_and_display() {
+        use OperandSize as O;
+        let cases = [
+            (O::Byte, 8, "byte"),
+            (O::Word, 16, "word"),
+            (O::Dword, 32, "dword"),
+            (O::Qword, 64, "qword"),
+            (O::Xmmword, 128, "xmmword"),
+            (O::Ymmword, 256, "ymmword"),
+            (O::Zmmword, 512, "zmmword"),
+        ];
+        for (size, bits, text) in cases {
+            assert_eq!(size.bits(), bits);
+            assert_eq!(alloc::format!("{size}"), text);
+        }
+    }
 }
