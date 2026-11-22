@@ -1,7 +1,7 @@
 //! Lexer for assembly source text.
 //!
-//! The lexer tokenizes assembly source into a stream of [`Token`](crate::lexer::Token)s, each
-//! carrying its [`Span`](crate::error::Span) (source position) so that error messages can
+//! The lexer tokenizes assembly source into a stream of [`Token`s](crate::lexer::Token), each
+//! carrying its [`Span`] (source position) so that error messages can
 //! point back to the exact location in the original input.
 
 use alloc::borrow::Cow;
