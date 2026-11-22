@@ -41,7 +41,7 @@
 {
   "@context": "https://schema.org",
   "@type": "SoftwareSourceCode",
-  "name": "asm-rs",
+  "name": "asm-kit",
   "description": {{ config.description | json_encode | safe }},
   "url": {{ config.base_url | json_encode | safe }},
   "codeRepository": {{ config.extra.repo | json_encode | safe }},
@@ -59,7 +59,7 @@
   <div class="wrap header-inner">
     <a class="brand" href="{{ get_url(path='@/_index.md') | safe }}">
       <img src="{{ get_url(path='icon.svg') | safe }}" alt="" width="26" height="26">
-      <span>asm-rs</span>
+      <span>asm-kit</span>
     </a>
     <nav aria-label="Main">
       <ul class="nav">
@@ -79,7 +79,7 @@
 <footer class="site-footer">
   <div class="wrap">
     <p>
-      <strong>asm-rs</strong> — pure Rust multi-architecture assembly engine.
+      <strong>asm-kit</strong> — pure Rust multi-architecture assembly engine.
       Dual-licensed <a href="{{ config.extra.repo }}/blob/main/LICENSE-MIT">MIT</a> or
       <a href="{{ config.extra.repo }}/blob/main/LICENSE-APACHE">Apache-2.0</a>.
     </p>

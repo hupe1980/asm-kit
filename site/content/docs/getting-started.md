@@ -1,13 +1,13 @@
 +++
 title = "Getting Started"
-description = "Install asm-rs and assemble your first machine code — one-shot API, builder API, labels, and compile-time macros."
+description = "Install asm-kit and assemble your first machine code — one-shot API, builder API, labels, and compile-time macros."
 weight = 1
 +++
 
 ## Installation
 
 ```sh
-cargo add asm-rs
+cargo add asm-kit
 ```
 
 **Minimum Supported Rust Version**: 1.75
@@ -17,7 +17,7 @@ cargo add asm-rs
 For zero-overhead compile-time assembly:
 
 ```sh
-cargo add asm-rs asm-rs-macros
+cargo add asm-kit asm-kit-macros
 ```
 
 ## One-Shot Assembly
@@ -25,7 +25,7 @@ cargo add asm-rs asm-rs-macros
 The simplest way to assemble code — pass source text and get machine code bytes:
 
 ```rust
-use asm_rs::{assemble, Arch};
+use asm_kit::{assemble, Arch};
 
 let bytes = assemble("mov eax, 42\nret", Arch::X86_64).unwrap();
 assert_eq!(bytes[0], 0xB8); // mov eax, imm32
@@ -34,7 +34,7 @@ assert_eq!(bytes[0], 0xB8); // mov eax, imm32
 ### With Base Address
 
 ```rust
-use asm_rs::{assemble_at, Arch};
+use asm_kit::{assemble_at, Arch};
 
 let bytes = assemble_at("nop\nret", Arch::X86_64, 0x400000).unwrap();
 ```
@@ -44,7 +44,7 @@ let bytes = assemble_at("nop\nret", Arch::X86_64, 0x400000).unwrap();
 The builder API offers fine-grained control over the assembly process:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit("push rbp").unwrap();
@@ -64,7 +64,7 @@ println!("Generated {} bytes", result.len());
 The `finish()` method returns an `AssemblyResult` with rich output:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.base_address(0x401000);
@@ -94,10 +94,10 @@ println!("{}", result.listing());
 
 ## AT&T / GAS Syntax
 
-asm-rs supports full AT&T/GAS syntax (`%reg`, `$imm`, reversed operand order):
+asm-kit supports full AT&T/GAS syntax (`%reg`, `$imm`, reversed operand order):
 
 ```rust
-use asm_rs::{Assembler, Arch, Syntax};
+use asm_kit::{Assembler, Arch, Syntax};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.syntax(Syntax::Att);
@@ -120,7 +120,7 @@ You can also switch syntax mid-stream with `.syntax att` / `.syntax intel` direc
 Forward and backward references are resolved automatically:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit(r#"
@@ -139,7 +139,7 @@ Short branches (rel8, 2 bytes) are preferred; they are automatically promoted to
 long form (rel32, 5–6 bytes) only when the target is out of range:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit("je done\ndone:\nret").unwrap();
@@ -153,7 +153,7 @@ assert_eq!(result.bytes(), &[0x74, 0x00, 0xC3]);
 Define constants with `.equ`, `.set`, or `name = expression`:
 
 ```rust
-use asm_rs::{assemble, Arch};
+use asm_kit::{assemble, Arch};
 
 let bytes = assemble(r#"
     .equ SYS_EXIT, 60
@@ -166,7 +166,7 @@ let bytes = assemble(r#"
 Or via the builder API:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.define_constant("SYS_EXIT", 60);
@@ -179,7 +179,7 @@ let result = asm.finish().unwrap();
 Embed raw data alongside code:
 
 ```rust
-use asm_rs::{assemble, Arch};
+use asm_kit::{assemble, Arch};
 
 let bytes = assemble(r#".asciz "Hello, World!""#, Arch::X86_64).unwrap();
 assert_eq!(&bytes[..13], b"Hello, World!");
@@ -191,7 +191,7 @@ assert_eq!(bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
 ### Builder Convenience Methods
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit("push rbp").unwrap();
@@ -210,7 +210,7 @@ let result = asm.finish().unwrap();
 The built-in preprocessor supports macros, loops, and conditional assembly:
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit(r#"
@@ -241,7 +241,7 @@ let result = asm.finish().unwrap();
 ### Repeat Loops & Conditional Assembly
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.define_preprocessor_symbol("DEBUG", 1);
@@ -264,10 +264,10 @@ let result = asm.finish().unwrap();
 
 ## Compile-Time Assembly
 
-The `asm-rs-macros` crate provides proc-macros for zero-overhead compile-time assembly:
+The `asm-kit-macros` crate provides proc-macros for zero-overhead compile-time assembly:
 
 ```rust
-use asm_rs_macros::{asm_bytes, asm_array};
+use asm_kit_macros::{asm_bytes, asm_array};
 
 // Assemble at compile time → &'static [u8]
 const SHELLCODE: &[u8] = asm_bytes!(x86_64, "
@@ -291,7 +291,7 @@ Assembly errors become compile-time errors with full diagnostics.
 ### x86-64
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit(r#"
@@ -306,7 +306,7 @@ let result = asm.finish().unwrap();
 ### ARM32
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::Arm);
 asm.emit(r#"
@@ -320,7 +320,7 @@ let result = asm.finish().unwrap();
 ### AArch64
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::Aarch64);
 asm.emit(r#"
@@ -334,7 +334,7 @@ let result = asm.finish().unwrap();
 ### RISC-V
 
 ```rust
-use asm_rs::{assemble, Arch};
+use asm_kit::{assemble, Arch};
 
 let bytes = assemble(r#"
     li a7, 93           # SYS_exit = 93
@@ -348,7 +348,7 @@ let bytes = assemble(r#"
 All errors include source location information:
 
 ```rust
-use asm_rs::{assemble, Arch, AsmError};
+use asm_kit::{assemble, Arch, AsmError};
 
 match assemble("foobar", Arch::X86_64) {
     Err(AsmError::UnknownMnemonic { mnemonic, .. }) => {

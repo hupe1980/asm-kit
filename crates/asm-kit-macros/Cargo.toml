@@ -1,0 +1,17 @@
+[package]
+name = "asm-kit-macros"
+description = "Compile-time assembly proc-macros for asm-kit"
+keywords = ["assembler", "macro", "shellcode", "compile-time"]
+categories = ["development-tools", "encoding"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+asm-kit = { version = "0.2.0", path = "../asm-kit", default-features = true }

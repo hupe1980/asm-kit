@@ -1,4 +1,4 @@
-# cargo-deny configuration — supply-chain policy for asm-rs.
+# cargo-deny configuration — supply-chain policy for asm-kit.
 #
 # The crate ships zero runtime dependencies by default (serde is optional), so
 # the policy here is deliberately strict: anything that would introduce a
@@ -17,7 +17,7 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [licenses]
-# Permissive licences only — asm-rs is MIT OR Apache-2.0 and is meant to be
+# Permissive licences only — asm-kit is MIT OR Apache-2.0 and is meant to be
 # embeddable without licence review.
 allow = [
     "MIT",

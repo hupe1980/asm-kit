@@ -1,13 +1,13 @@
-# asm-rs
+# asm-kit
 
 A pure Rust multi-architecture assembly engine for offensive security.
 
-[![Crates.io](https://img.shields.io/crates/v/asm-rs.svg)](https://crates.io/crates/asm-rs)
-[![docs.rs](https://docs.rs/asm-rs/badge.svg)](https://docs.rs/asm-rs)
-[![CI](https://github.com/hupe1980/asm-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/hupe1980/asm-rs/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/asm-kit.svg)](https://crates.io/crates/asm-kit)
+[![docs.rs](https://docs.rs/asm-kit/badge.svg)](https://docs.rs/asm-kit)
+[![CI](https://github.com/hupe1980/asm-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/hupe1980/asm-kit/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-[📖 Documentation](https://hupe1980.github.io/asm-rs/) · [📚 API Reference](https://docs.rs/asm-rs) · [📦 Crate](https://crates.io/crates/asm-rs)
+[📖 Documentation](https://hupe1980.github.io/asm-kit/) · [📚 API Reference](https://docs.rs/asm-kit) · [📦 Crate](https://crates.io/crates/asm-kit)
 
 > Zero `unsafe`, `no_std`-compatible, designed for embedding in exploit compilers, JIT engines, security tools, and shellcode generators.
 
@@ -42,13 +42,13 @@ A pure Rust multi-architecture assembly engine for offensive security.
 ## 🚀 Quick Start
 
 ```sh
-cargo add asm-rs
+cargo add asm-kit
 ```
 
 ### One-Shot Assembly
 
 ```rust
-use asm_rs::{assemble, Arch};
+use asm_kit::{assemble, Arch};
 
 let bytes = assemble("mov eax, 42\nret", Arch::X86_64).unwrap();
 assert_eq!(bytes[0], 0xB8); // mov eax, imm32
@@ -57,7 +57,7 @@ assert_eq!(bytes[0], 0xB8); // mov eax, imm32
 ### Builder API
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.emit("push rbp").unwrap();
@@ -75,7 +75,7 @@ println!("Generated {} bytes", result.len());
 ### AT&T / GAS Syntax
 
 ```rust
-use asm_rs::{Assembler, Arch, Syntax};
+use asm_kit::{Assembler, Arch, Syntax};
 
 let mut asm = Assembler::new(Arch::X86_64);
 asm.syntax(Syntax::Att);
@@ -91,7 +91,7 @@ asm.emit(r#"
 ### ARM / AArch64 with UAL Syntax
 
 ```rust
-use asm_rs::{assemble, Arch};
+use asm_kit::{assemble, Arch};
 
 // `#` is the immediate prefix for ARM/Thumb/AArch64 (as in GNU as and the
 // Arm reference manuals); `@` and `//` start comments.
@@ -112,10 +112,10 @@ assemble("push {r0-r7}", Arch::Thumb).unwrap();
 ### Multi-Architecture Shellcode
 
 ```rust
-use asm_rs::{Assembler, Arch};
+use asm_kit::{Assembler, Arch};
 
 // x86-64
-let bytes = asm_rs::assemble("xor edi, edi; mov eax, 60; syscall", Arch::X86_64).unwrap();
+let bytes = asm_kit::assemble("xor edi, edi; mov eax, 60; syscall", Arch::X86_64).unwrap();
 
 // AArch64
 let mut asm = Assembler::new(Arch::Aarch64);
@@ -126,20 +126,20 @@ let mut asm = Assembler::new(Arch::Arm);
 asm.emit("mov r0, #0; mov r7, #1; svc #0").unwrap();
 
 // RISC-V
-let bytes = asm_rs::assemble("li a7, 93; li a0, 0; ecall", Arch::Rv32).unwrap();
+let bytes = asm_kit::assemble("li a7, 93; li a0, 0; ecall", Arch::Rv32).unwrap();
 ```
 
 ### Compile-Time Assembly
 
 ```rust
-use asm_rs_macros::{asm_bytes, asm_array};
+use asm_kit_macros::{asm_bytes, asm_array};
 
 const SHELLCODE: &[u8] = asm_bytes!(x86_64, "xor eax, eax; inc eax; ret");
 const NOP: [u8; 1] = asm_array!(x86_64, "nop");
 const ARM_CODE: &[u8] = asm_bytes!(arm, "bx lr");
 ```
 
-> See [`crates/asm-rs-macros/README.md`](crates/asm-rs-macros/README.md) for full proc-macro documentation.
+> See [`crates/asm-kit-macros/README.md`](crates/asm-kit-macros/README.md) for full proc-macro documentation.
 
 ## 🧪 Testing
 
@@ -188,7 +188,7 @@ Rust **1.75** or later.
 
 ## 📖 Learn More
 
-For the full reference — architecture details, ISA instruction tables, directives, API docs, and configuration options — visit the **[documentation site](https://hupe1980.github.io/asm-rs/)**.
+For the full reference — architecture details, ISA instruction tables, directives, API docs, and configuration options — visit the **[documentation site](https://hupe1980.github.io/asm-kit/)**.
 
 ## 📄 License
 

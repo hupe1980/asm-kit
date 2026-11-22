@@ -1,5 +1,5 @@
-base_url = "https://hupe1980.github.io/asm-rs"
-title = "asm-rs"
+base_url = "https://hupe1980.github.io/asm-kit"
+title = "asm-kit"
 description = "Pure Rust multi-architecture assembly engine. Assemble x86, x86-64, ARM, Thumb, AArch64 and RISC-V to machine code at runtime or compile time. Zero unsafe, no_std, WebAssembly-ready."
 
 default_language = "en"
@@ -37,9 +37,9 @@ include_content = false
 skip_prefixes = ["https://crates.io"]
 
 [extra]
-repo = "https://github.com/hupe1980/asm-rs"
-crate = "https://crates.io/crates/asm-rs"
-api_docs = "https://docs.rs/asm-rs"
+repo = "https://github.com/hupe1980/asm-kit"
+crate = "https://crates.io/crates/asm-kit"
+api_docs = "https://docs.rs/asm-kit"
 author = "hupe1980"
 # Used for og:image and twitter:image; relative to base_url.
 social_image = "og.png"
@@ -48,5 +48,5 @@ social_image = "og.png"
 nav = [
   { name = "Docs", url = "@/docs/_index.md" },
   { name = "ISA Reference", url = "@/docs/reference/_index.md" },
-  { name = "API", url = "https://docs.rs/asm-rs", external = true },
+  { name = "API", url = "https://docs.rs/asm-kit", external = true },
 ]

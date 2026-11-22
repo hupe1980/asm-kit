@@ -1,6 +1,6 @@
 +++
 title = "Architecture"
-description = "How asm-rs works inside: the preprocessor, lexer, parser, IR, optimizer, per-architecture encoders and the fragment-based linker."
+description = "How asm-kit works inside: the preprocessor, lexer, parser, IR, optimizer, per-architecture encoders and the fragment-based linker."
 weight = 4
 +++
 

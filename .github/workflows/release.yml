@@ -33,16 +33,16 @@ jobs:
       - name: Verify version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "asm-rs") | .version')
+          CARGO_VERSION=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "asm-kit") | .version')
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1
           fi
           echo "Publishing version $TAG_VERSION"
 
-      # Publish asm-rs first (asm-rs-macros depends on it)
-      - name: Publish asm-rs
-        run: cargo publish -p asm-rs
+      # Publish asm-kit first (asm-kit-macros depends on it)
+      - name: Publish asm-kit
+        run: cargo publish -p asm-kit
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -50,9 +50,9 @@ jobs:
       - name: Wait for index propagation
         run: sleep 30
 
-      # Publish asm-rs-macros
-      - name: Publish asm-rs-macros
-        run: cargo publish -p asm-rs-macros
+      # Publish asm-kit-macros
+      - name: Publish asm-kit-macros
+        run: cargo publish -p asm-kit-macros
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

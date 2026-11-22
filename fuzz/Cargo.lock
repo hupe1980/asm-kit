@@ -18,14 +18,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "asm-rs"
-version = "0.1.1"
+name = "asm-kit"
+version = "0.2.0"
 
 [[package]]
-name = "asm_rs-fuzz"
+name = "asm_kit-fuzz"
 version = "0.0.0"
 dependencies = [
- "asm-rs",
+ "asm-kit",
  "bad64",
  "iced-x86",
  "libfuzzer-sys",
