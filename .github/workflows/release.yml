@@ -24,6 +24,9 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # required for crates.io trusted publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,11 +43,16 @@ jobs:
           fi
           echo "Publishing version $TAG_VERSION"
 
+      # Exchange the GitHub OIDC token for a short-lived crates.io token
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       # Publish asm-kit first (asm-kit-macros depends on it)
       - name: Publish asm-kit
         run: cargo publish -p asm-kit
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
       # Wait for crates.io index to update
       - name: Wait for index propagation
@@ -54,7 +62,7 @@ jobs:
       - name: Publish asm-kit-macros
         run: cargo publish -p asm-kit-macros
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   # ── Create GitHub release ────────────────────────────────
   github-release:
